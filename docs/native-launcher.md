@@ -15,6 +15,22 @@ Enable the existing system-tray option in AutoPlug's general configuration and c
 
 The browser imports favorites from the standard Minecraft `servers.dat` when the dashboard starts. Importing reads the vanilla file and keeps AutoPlug favorites separately; it does not rewrite the vanilla file. Favorites can also be added through the dashboard or CLI.
 
+### Dashboard previews
+
+These previews render the actual Swing components with synthetic fixture data at 1200 × 820 pixels. They show the layout and available controls; they do not demonstrate live Microsoft authentication, server connectivity or router sharing. The fixture data and rendering helper are in `DashboardPanelTest`.
+
+**Profiles:** isolated client and server collections, reusable templates, and migration controls.
+
+![Profiles dashboard with sample vanilla, Fabric and Paper profiles](images/native-launcher/profiles.png)
+
+**Virtual Worlds:** separate saved worlds with local play, explicit sharing and EULA controls.
+
+![Virtual Worlds dashboard with two sample worlds](images/native-launcher/virtual-worlds.png)
+
+**Settings:** runtime overrides, default profile, sharing preference and account controls.
+
+![Settings dashboard with an offline fixture account and empty Microsoft application ID](images/native-launcher/settings.png)
+
 ## Profiles and migration
 
 | Type | Purpose | Collection folder |
