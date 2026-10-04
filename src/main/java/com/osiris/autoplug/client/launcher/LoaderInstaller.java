@@ -262,11 +262,29 @@ final class LoaderInstaller {
         Files.createDirectories(directory);
         List<String> command = new ArrayList<>(); command.add(java.toString()); command.add("-Djava.awt.headless=true"); command.addAll(arguments);
         Path output = directory.resolve("autoplug-loader-install.log");
-        Process process = new ProcessBuilder(command).directory(directory.toFile()).redirectErrorStream(true).redirectOutput(output.toFile()).start();
+        Process process = new ProcessBuilder(command).directory(directory.toFile()).redirectErrorStream(true).start();
+        java.util.concurrent.atomic.AtomicReference<IOException> outputFailure = new java.util.concurrent.atomic.AtomicReference<>();
+        // Drain while the installer runs: its downloads and substeps must not disappear into a file until exit.
+        Thread reader = new Thread(() -> {
+            try (java.io.BufferedReader lines = new java.io.BufferedReader(new java.io.InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8));
+                 java.io.BufferedWriter writer = Files.newBufferedWriter(output, StandardCharsets.UTF_8)) {
+                String line;
+                while ((line = lines.readLine()) != null) {
+                    String safe = DownloadProgress.installerOutput(line);
+                    writer.write(safe); writer.newLine(); writer.flush();
+                    if (log != null) log.accept(safe);
+                }
+            } catch (IOException e) { outputFailure.set(e); }
+        }, "autoplug-loader-output");
+        reader.setDaemon(true);
+        reader.start();
         try {
             if (!process.waitFor(20, TimeUnit.MINUTES)) throw new IOException("Loader installation timed out. See " + output);
+            reader.join(5000);
+            if (reader.isAlive()) throw new IOException("Loader output did not finish. See " + output);
+            if (outputFailure.get() != null) throw new IOException("Unable to record loader progress. See " + output, outputFailure.get());
             if (process.exitValue() != 0) throw new IOException("Loader installer exited with " + process.exitValue() + ". See " + output);
-            log.accept("Official loader installer completed");
+            if (log != null) log.accept("Official loader installer completed");
         } finally {
             if (process.isAlive()) { process.descendants().forEach(ProcessHandle::destroy); process.destroyForcibly(); }
         }

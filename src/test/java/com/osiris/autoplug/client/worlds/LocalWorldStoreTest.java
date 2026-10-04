@@ -190,6 +190,91 @@ class LocalWorldStoreTest {
         assertArrayEquals(original, Files.readAllBytes(minecraft.resolve("saves")));
     }
 
+    @Test void displaysBoundedMetadataAndExactSmallSaveSizeWithoutRewritingIt() throws Exception {
+        Path minecraft = temporary.resolve("minecraft");
+        Path directory = Files.createDirectories(minecraft.resolve("saves/Detailed"));
+        try (DataOutputStream out = new DataOutputStream(Files.newOutputStream(directory.resolve("level.dat")))) {
+            tag(out, 10, ""); tag(out, 10, "Data");
+            tag(out, 8, "LevelName"); out.writeUTF("Detailed");
+            tag(out, 10, "Version"); tag(out, 8, "Name"); out.writeUTF("1.21.1"); out.writeByte(0);
+            tag(out, 4, "LastPlayed"); out.writeLong(1700000000123L);
+            tag(out, 1, "allowCommands"); out.writeByte(1);
+            tag(out, 1, "hardcore"); out.writeByte(1);
+            tag(out, 10, "DataPacks"); tag(out, 9, "Enabled"); out.writeByte(8); out.writeInt(2);
+            out.writeUTF("vanilla"); out.writeUTF("file/custom-pack"); out.writeByte(0);
+            out.writeByte(0); out.writeByte(0);
+        }
+        byte[] level = Files.readAllBytes(directory.resolve("level.dat"));
+        Files.write(directory.resolve("region.mca"), new byte[128]);
+        LocalWorld world = new LocalWorldStore(minecraft).get("local:Detailed");
+        assertEquals(1700000000123L, world.lastPlayed); assertTrue(world.cheats); assertTrue(world.hardcore);
+        assertTrue(world.quickPlayEligible); assertFalse(world.modded);
+        assertEquals(Arrays.asList("vanilla", "file/custom-pack"), world.dataPacks);
+        assertEquals(level.length + 128, world.sizeBytes); assertTrue(world.sizeComplete);
+        assertThrows(UnsupportedOperationException.class, () -> world.dataPacks.add("mutate"));
+        assertArrayEquals(level, Files.readAllBytes(directory.resolve("level.dat")));
+        assertEquals(0, LocalWorldStore.directorySize(directory, 1)[1], "Exhausted traversal is labeled a lower bound");
+        try (LauncherServices service = new LauncherServices(temporary.resolve("autoplug"), minecraft, null)) {
+            LauncherActions.WorldInfo info = service.worlds().get(0);
+            assertTrue(info.metadataAvailable); assertTrue(info.cheats); assertTrue(info.hardcore);
+            assertEquals(world.lastPlayed, info.lastPlayed); assertEquals(world.dataPacks, info.dataPacks);
+        }
+    }
+
+    @Test void localOwnershipIsIdempotentAndNeverDuplicatesOrModifiesTheOriginal() throws Exception {
+        Path minecraft = temporary.resolve("minecraft"), root = temporary.resolve("autoplug");
+        Path directory = save(minecraft, "Existing", "Existing", "1.21.1", true, false, false);
+        byte[] original = Files.readAllBytes(directory.resolve("level.dat"));
+        LocalWorldStore local = new LocalWorldStore(minecraft); WorldStore store = new WorldStore(root.resolve("worlds"));
+        LocalWorld unowned = local.get("local:Existing");
+        assertEquals(unowned.id, store.ownedLocal(unowned, false).id);
+        LocalWorld owned = store.registerLocal(unowned);
+        assertTrue(owned.id.matches("world-[a-f0-9-]{36}"));
+        assertEquals(owned.id, store.registerLocal(local.get("local:Existing")).id);
+        assertEquals(owned.id, new WorldStore(root.resolve("worlds")).registerLocal(unowned).id);
+        assertEquals(directory, store.getLocal(owned.id, local).directory);
+        assertEquals(owned.id, store.getLocal("local:Existing", local).id);
+        assertTrue(store.list().isEmpty(), "Local reference must not also appear as a virtual server world");
+        try (java.util.stream.Stream<Path> entries = Files.list(root.resolve("worlds"))) { assertEquals(1, entries.count()); }
+        try (LauncherServices service = new LauncherServices(root, minecraft, null)) {
+            List<LauncherActions.WorldInfo> displayed = service.worlds();
+            assertEquals(1, displayed.size()); assertEquals(owned.id, displayed.get(0).id); assertTrue(displayed.get(0).local);
+            assertThrows(IOException.class, () -> service.launchLocalWorld(owned.id, "1.20.1"));
+        }
+        assertArrayEquals(original, Files.readAllBytes(directory.resolve("level.dat")));
+        assertFalse(Files.exists(directory.resolve("world.json")));
+        assertFalse(Files.exists(root.resolve("worlds").resolve(owned.id).resolve("server")));
+    }
+
+    @Test void alteredOwnershipCannotRedirectLaunchToAnotherSave() throws Exception {
+        Path minecraft = temporary.resolve("minecraft");
+        save(minecraft, "Original", "Original", "1.21.1", false, false, false);
+        save(minecraft, "Other", "Other", "1.21.1", false, false, false);
+        LocalWorldStore local = new LocalWorldStore(minecraft); WorldStore store = new WorldStore(temporary.resolve("worlds"));
+        LocalWorld owned = store.registerLocal(local.get("local:Original"));
+        Path reference = temporary.resolve("worlds").resolve(owned.id).resolve("local-world.json");
+        String json = new String(Files.readAllBytes(reference), java.nio.charset.StandardCharsets.UTF_8);
+        Files.write(reference, json.replace("local:Original", "local:Other").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        assertThrows(IOException.class, () -> store.getLocal(owned.id, local));
+        assertThrows(IOException.class, () -> store.registerLocal(local.get("local:Original")));
+    }
+
+    @Test void ownershipRecoversEmptyInterruptedEntryButNeverOverwritesUnrecognizedData() throws Exception {
+        Path minecraft = temporary.resolve("minecraft");
+        save(minecraft, "Original", "Original", "1.21.1", false, false, false);
+        LocalWorld original = new LocalWorldStore(minecraft).get("local:Original");
+        WorldStore store = new WorldStore(temporary.resolve("worlds"));
+        LocalWorld owned = store.registerLocal(original);
+        Path entry = temporary.resolve("worlds").resolve(owned.id), reference = entry.resolve("local-world.json");
+        Files.delete(reference); // Simulate an interrupted registration leaving its new directory empty.
+        assertEquals(owned.id, store.registerLocal(original).id);
+        Files.delete(reference);
+        byte[] data = new byte[]{1, 2, 3}; Files.write(entry.resolve("existing-save.dat"), data);
+        assertThrows(IOException.class, () -> store.registerLocal(original));
+        assertArrayEquals(data, Files.readAllBytes(entry.resolve("existing-save.dat")));
+        assertFalse(Files.exists(reference));
+    }
+
     private static Path save(Path minecraft, String folder, String name, String version, boolean compressed, boolean modded, boolean forge) throws IOException {
         Path directory = Files.createDirectories(minecraft.resolve("saves").resolve(folder));
         OutputStream raw = Files.newOutputStream(directory.resolve("level.dat"));

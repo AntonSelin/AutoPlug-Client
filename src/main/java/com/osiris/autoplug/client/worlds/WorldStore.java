@@ -13,6 +13,9 @@ import java.util.stream.Stream;
 
 /** Persistent metadata; never places a world save inside a reusable profile. */
 public final class WorldStore {
+    private static final class LocalReference {
+        String id, localId, directory;
+    }
     private final Path root;
     private final Gson gson = new GsonBuilder().setPrettyPrinting().create();
 
@@ -51,6 +54,64 @@ public final class WorldStore {
         }
         worlds.sort(Comparator.comparingLong(w -> w.createdAt));
         return worlds;
+    }
+
+    /** Register ownership without moving, copying, linking or rewriting the user's save. */
+    public synchronized LocalWorld registerLocal(LocalWorld world) throws IOException {
+        return ownedLocal(world, true);
+    }
+
+    /** Discovery only consults an existing entry, so opening the browser remains read-only. */
+    public synchronized LocalWorld ownedLocal(LocalWorld world, boolean create) throws IOException {
+        String source = world.directory.toRealPath().toString();
+        String id = "world-" + UUID.nameUUIDFromBytes(source.getBytes(StandardCharsets.UTF_8));
+        Path directory = metadataDirectory(id), file = directory.resolve("local-world.json");
+        if (Files.exists(file, LinkOption.NOFOLLOW_LINKS)) {
+            LocalReference reference = readLocal(id);
+            if (!source.equals(reference.directory) || !("local:" + world.saveName()).equals(reference.localId))
+                throw new IOException("Local world ownership does not match the save");
+            return world.withId(id);
+        }
+        if (!create) return world;
+        if (Files.exists(directory, LinkOption.NOFOLLOW_LINKS)) {
+            // An interrupted metadata write may leave an empty directory. Reuse it,
+            // but never adopt a directory containing unrecognized user data.
+            try (DirectoryStream<Path> entries = Files.newDirectoryStream(directory)) {
+                if (entries.iterator().hasNext()) throw new IOException("World ownership directory already contains unrecognized data");
+            }
+        } else Files.createDirectory(directory);
+        LocalReference reference = new LocalReference(); reference.id = id;
+        reference.localId = "local:" + world.saveName(); reference.directory = source;
+        Path temporary = Files.createTempFile(directory, "local-world-", ".tmp");
+        try {
+            Files.write(temporary, gson.toJson(reference).getBytes(StandardCharsets.UTF_8));
+            try { Files.move(temporary, file, StandardCopyOption.ATOMIC_MOVE); }
+            catch (AtomicMoveNotSupportedException e) { Files.move(temporary, file); }
+        } finally { Files.deleteIfExists(temporary); }
+        return world.withId(id);
+    }
+
+    public synchronized LocalWorld getLocal(String id, LocalWorldStore localWorlds) throws IOException {
+        if (id != null && id.startsWith("local:")) return ownedLocal(localWorlds.get(id), false);
+        LocalReference reference = readLocal(id);
+        LocalWorld world = localWorlds.get(reference.localId);
+        if (!world.directory.toRealPath().toString().equals(reference.directory)) throw new IOException("Local world moved or reference is invalid");
+        LocalWorld owned = ownedLocal(world, false);
+        if (!owned.id.equals(id)) throw new IOException("Local world ownership identity does not match");
+        return owned;
+    }
+
+    private LocalReference readLocal(String id) throws IOException {
+        if (id == null || !id.matches("world-[a-f0-9-]{36}")) throw new IOException("Invalid owned local world identifier");
+        Path file = metadataDirectory(id).resolve("local-world.json");
+        if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS) || Files.isSymbolicLink(file) || Files.size(file) > 16384)
+            throw new IOException("Missing or invalid local world ownership metadata");
+        try (Reader reader = Files.newBufferedReader(file, StandardCharsets.UTF_8)) {
+            LocalReference reference = gson.fromJson(reader, LocalReference.class);
+            if (reference == null || !id.equals(reference.id) || reference.localId == null || reference.directory == null)
+                throw new IOException("Invalid local world ownership metadata");
+            return reference;
+        } catch (com.google.gson.JsonParseException e) { throw new IOException("Invalid local world ownership metadata", e); }
     }
 
     public synchronized VirtualWorld get(String id) throws IOException {
@@ -104,6 +165,9 @@ public final class WorldStore {
         if (id == null || !id.matches("[a-zA-Z0-9_-]{1,80}")) throw new IllegalArgumentException("Invalid world id");
         Path directory = root.resolve(id).normalize();
         if (!directory.startsWith(root) || Files.isSymbolicLink(directory)) throw new IOException("Unsafe world directory");
+        if (Files.exists(directory, LinkOption.NOFOLLOW_LINKS)
+                && (!Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS) || !directory.toRealPath().equals(root.toRealPath().resolve(id))))
+            throw new IOException("Linked or external world ownership directories are not supported");
         return directory;
     }
 }

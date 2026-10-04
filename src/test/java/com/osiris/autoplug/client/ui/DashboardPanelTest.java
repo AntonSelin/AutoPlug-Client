@@ -17,10 +17,114 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Consumer;
 import static org.junit.jupiter.api.Assertions.*;
 
 class DashboardPanelTest {
     @TempDir Path directory;
+
+    @Test void progressKeepsLiveStepThroughOtherRefreshAndReleasesSubscriptions() throws Exception {
+        AtomicReference<Consumer<String>> listener = new AtomicReference<>();
+        AtomicReference<Consumer<Integer>> measured = new AtomicReference<>();
+        CountDownLatch started = new CountDownLatch(1), release = new CountDownLatch(1);
+        AtomicInteger settingsCalls = new AtomicInteger();
+        LauncherActions actions = new LauncherActions() {
+            @Override public void onProgress(Consumer<String> callback) { listener.set(callback); }
+            @Override public void onProgressValue(Consumer<Integer> callback) { measured.set(callback); }
+            @Override public SettingsInfo settings() { SettingsInfo result = new SettingsInfo(); result.account = "Account " + settingsCalls.incrementAndGet(); return result; }
+            @Override public void addArtifact(String id, String path, String project) throws Exception { started.countDown(); assertTrue(release.await(4, TimeUnit.SECONDS)); }
+        };
+        AtomicReference<DashboardPanel> panel = new AtomicReference<>();
+        SwingUtilities.invokeAndWait(() -> panel.set(new DashboardPanel(actions, new ServerBrowserService(directory.resolve("servers.json"), directory.resolve("servers.dat")), false)));
+        try {
+            awaitUi(() -> !findNamed(panel.get(), "activity-progress").isVisible());
+            SwingUtilities.invokeAndWait(() -> panel.get().importArtifact(new ProfileInfo("test", "Test", "1.21.1", "VANILLA", "MODS", "", false), "example.jar", ""));
+            assertTrue(started.await(4, TimeUnit.SECONDS));
+            listener.get().accept("Resolving libraries https://example.invalid/library.jar");
+            awaitUi(() -> containsText(panel.get(), "Resolving libraries"));
+            SwingUtilities.invokeAndWait(() -> {
+                assertTrue(((JProgressBar) findNamed(panel.get(), "activity-progress")).isIndeterminate());
+                assertEquals("https://example.invalid/library.jar", ((JTextField) findNamed(panel.get(), "download-source")).getText());
+                findButton(panel.get(), "Reload").doClick();
+            });
+            awaitUi(() -> containsText(panel.get(), "Account 2"));
+            SwingUtilities.invokeAndWait(() -> assertTrue(containsText(panel.get(), "Resolving libraries")));
+            measured.get().accept(37);
+            awaitUi(() -> ((JProgressBar) findNamed(panel.get(), "activity-progress")).getValue() == 37);
+            SwingUtilities.invokeAndWait(() -> {
+                assertFalse(((JProgressBar) findNamed(panel.get(), "activity-progress")).isIndeterminate());
+                findButton(panel.get(), "Reload").doClick();
+            });
+            awaitUi(() -> containsText(panel.get(), "Account 3"));
+            SwingUtilities.invokeAndWait(() -> assertFalse(((JProgressBar) findNamed(panel.get(), "activity-progress")).isIndeterminate()));
+            release.countDown(); awaitUi(() -> !findNamed(panel.get(), "activity-progress").isVisible());
+            Consumer<String> stale = listener.get();
+            SwingUtilities.invokeAndWait(() -> panel.get().close()); assertNull(listener.get()); assertNull(measured.get());
+            stale.accept("Should not appear");
+            SwingUtilities.invokeAndWait(() -> assertFalse(containsText(panel.get(), "Should not appear")));
+        } finally { release.countDown(); SwingUtilities.invokeAndWait(() -> panel.get().close()); }
+    }
+
+    @Test void navigationAndSettingsReflowWithoutDiscardingEdits() throws Exception {
+        AtomicReference<DashboardPanel> panel = new AtomicReference<>();
+        SwingUtilities.invokeAndWait(() -> panel.set(new DashboardPanel(new LauncherActions() {}, new ServerBrowserService(directory.resolve("servers.json"), directory.resolve("servers.dat")), false)));
+        try {
+            awaitUi(() -> !findNamed(panel.get(), "activity-progress").isVisible());
+            SwingUtilities.invokeAndWait(() -> {
+                for (String view : new String[]{"Server Browser", "Worlds", "Profiles", "Server Manager", "Settings"}) {
+                    findButton(panel.get(), view).doClick();
+                    assertEquals(view, ((JLabel) findNamed(panel.get(), "navigation-title")).getText());
+                    assertTrue(findNamed(panel.get(), "page-" + view).isVisible());
+                }
+                panel.get().setSize(1200, 820); for (int i = 0; i < 3; i++) layout(panel.get());
+                Container grid = findNamed(panel.get(), "responsive-settings");
+                assertEquals(grid.getComponent(0).getY(), grid.getComponent(1).getY());
+                assertTrue(grid.getComponent(1).getX() > grid.getComponent(0).getX());
+                assertFalse(findNamed(panel.get(), "advanced-runtime-fields").isVisible());
+                findButton(panel.get(), "Advanced").doClick();
+                assertTrue(findNamed(panel.get(), "advanced-runtime-fields").isVisible());
+                JTextField runtime = findTextField(findNamed(panel.get(), "advanced-runtime-fields")); runtime.setText("/chosen/java");
+                panel.get().setSize(950, 620); for (int i = 0; i < 3; i++) layout(panel.get());
+                assertEquals(grid.getComponent(0).getX(), grid.getComponent(1).getX());
+                assertTrue(grid.getComponent(1).getY() >= grid.getComponent(0).getHeight());
+                assertTrue(runtime.getWidth() >= 80); assertEquals("/chosen/java", runtime.getText());
+                assertNotNull(findButton(panel.get(), "Save settings"));
+                AbstractButton copy = findAccessibleButton(panel.get(), "Copy address");
+                assertNotNull(copy); assertNotNull(copy.getIcon()); assertEquals("Copy address", copy.getToolTipText());
+            });
+        } finally { SwingUtilities.invokeAndWait(() -> panel.get().close()); }
+    }
+
+    @Test void parallelDownloadCompletionKeepsProgressVisibleUntilLastTransferEnds() throws Exception {
+        AtomicReference<DashboardPanel> panel = new AtomicReference<>();
+        SwingUtilities.invokeAndWait(() -> panel.set(new DashboardPanel(new LauncherActions() {}, new ServerBrowserService(directory.resolve("servers.json"), directory.resolve("servers.dat")), false)));
+        try {
+            awaitUi(() -> !findNamed(panel.get(), "activity-progress").isVisible());
+            try (com.osiris.autoplug.client.launcher.DownloadProgress.Transfer first = com.osiris.autoplug.client.launcher.DownloadProgress.begin("First asset", "https://example.invalid/first.jar");
+                 com.osiris.autoplug.client.launcher.DownloadProgress.Transfer second = com.osiris.autoplug.client.launcher.DownloadProgress.begin("Second asset", "https://example.invalid/second.jar")) {
+                first.complete(20, 20);
+                awaitUi(() -> containsText(panel.get(), "First asset — complete"));
+                SwingUtilities.invokeAndWait(() -> {
+                    JProgressBar bar = (JProgressBar) findNamed(panel.get(), "activity-progress"); assertTrue(bar.isVisible()); assertTrue(bar.isIndeterminate());
+                });
+                second.complete(30, 30);
+                awaitUi(() -> !findNamed(panel.get(), "activity-progress").isVisible());
+                SwingUtilities.invokeAndWait(() -> assertEquals("https://example.invalid/second.jar", ((JTextField) findNamed(panel.get(), "download-source")).getText()));
+            }
+        } finally { SwingUtilities.invokeAndWait(() -> panel.get().close()); }
+    }
+
+    @Test void worldMetadataReportsUnknownAndBoundedSizeTruthfully() {
+        WorldInfo unknown = new WorldInfo("unknown", "Unknown", "", "", "", "", false, true, "");
+        assertEquals("Additional save metadata unavailable", DashboardPanel.worldMetadata(unknown));
+        WorldInfo bounded = new WorldInfo("known", "Known", "", "", "", "", false, true, "1.21.1", true, -1, 1536, false, Arrays.asList("vanilla", "file/pack"), true, false, true);
+        String detail = DashboardPanel.worldMetadata(bounded);
+        assertTrue(detail.contains("Last played: Unknown")); assertTrue(detail.contains("Size: At least 1.5 KiB"));
+        assertTrue(detail.contains("Modded")); assertTrue(detail.contains("Cheats: On")); assertTrue(detail.contains("Hardcore: Off")); assertTrue(detail.contains("Datapacks: 2"));
+        WorldInfo partial = new WorldInfo("partial", "Partial", "", "", "", "", false, true, "1.21.1", false, -1, 1588, false, Arrays.asList("vanilla"), false, false, true);
+        assertTrue(DashboardPanel.worldMetadata(partial).contains("At least 1.5 KiB"));
+    }
 
     @Test void versionSelectionDoesNotConfuseVersionPrefixes() {
         assertTrue(DashboardPanel.versionMatches("Paper 1.21.1", "1.21.1"));
@@ -183,7 +287,7 @@ class DashboardPanelTest {
                 Thread.sleep(50);
                 SwingUtilities.invokeAndWait(() -> {
                     try {
-                    panel.get().setSize(width, height); layout(panel.get());
+                    panel.get().setSize(width, height); for (int pass = 0; pass < 3; pass++) layout(panel.get());
                     BufferedImage bitmap = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
                     Graphics2D graphics = bitmap.createGraphics();
                     graphics.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
@@ -207,8 +311,8 @@ class DashboardPanelTest {
                         new ProfileInfo("template", "My base template", "1.21.1", "FABRIC", "MODS", "/profiles/base", true));
             }
             @Override public List<WorldInfo> worlds() {
-                called(); return Arrays.asList(new WorldInfo("local:cottage", "Lakeside cottage", "", "", "/.minecraft/saves/Lakeside cottage", "", false, true, "1.21.1"),
-                        new WorldInfo("cove", "Quiet Cove", "paper", "vanilla", "/worlds/quiet-cove", "", false),
+                called(); return Arrays.asList(new WorldInfo("local:cottage", "Lakeside cottage", "", "", "/.minecraft/saves/Lakeside cottage", "", false, true, "1.21.1", false, 1791072000000L, 184549376, true, Arrays.asList("vanilla"), false, false, true),
+                        new WorldInfo("cove", "Quiet Cove", "paper", "vanilla", "/worlds/quiet-cove", "", false, false, "1.21.1", true, 1790990000000L, 597688320, true, Arrays.asList("vanilla", "file/terrain"), true, false, false),
                         new WorldInfo("local:archive", "An old adventure", "", "", "/.minecraft/saves/An old adventure", "", false, true, ""));
             }
             @Override public SettingsInfo settings() { called(); SettingsInfo settings = new SettingsInfo(); settings.account = "Offline · Alex"; settings.defaultProfile = "vanilla"; settings.java17 = "/runtimes/java-17/bin/java"; settings.java21 = "/runtimes/java-21/bin/java"; return settings; }
@@ -220,6 +324,18 @@ class DashboardPanelTest {
             if (component instanceof Container) { AbstractButton found = findButton((Container) component, text); if (found != null) return found; }
         }
         return null;
+    }
+    private static AbstractButton findAccessibleButton(Container container, String name) {
+        for (Component component : container.getComponents()) {
+            if (component instanceof AbstractButton && name.equals(component.getAccessibleContext().getAccessibleName())) return (AbstractButton) component;
+            if (component instanceof Container) { AbstractButton found = findAccessibleButton((Container) component, name); if (found != null) return found; }
+        } return null;
+    }
+    private static JTextField findTextField(Container container) {
+        for (Component component : container.getComponents()) {
+            if (component instanceof JTextField) return (JTextField) component;
+            if (component instanceof Container) { JTextField found = findTextField((Container) component); if (found != null) return found; }
+        } return null;
     }
     private static Container findNamed(Container container, String name) {
         if (name.equals(container.getName())) return container;

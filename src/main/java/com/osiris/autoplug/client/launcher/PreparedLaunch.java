@@ -12,13 +12,18 @@ public final class PreparedLaunch {
     public final List<String> arguments;
     public final String version;
     public final int javaMajor;
+    final List<Path> temporaryFiles;
 
     public PreparedLaunch(Path executable, Path gameDir, List<String> arguments, String version, int javaMajor) {
+        this(executable, gameDir, arguments, version, javaMajor, Collections.emptyList());
+    }
+    PreparedLaunch(Path executable, Path gameDir, List<String> arguments, String version, int javaMajor, List<Path> temporaryFiles) {
         this.executable = executable.toAbsolutePath().normalize();
         this.gameDir = gameDir.toAbsolutePath().normalize();
         this.arguments = Collections.unmodifiableList(new ArrayList<>(arguments));
         this.version = version;
         this.javaMajor = javaMajor;
+        this.temporaryFiles = Collections.unmodifiableList(new ArrayList<>(temporaryFiles));
     }
     public List<String> command() {
         List<String> result = new ArrayList<>();

@@ -41,6 +41,17 @@ public class ProfileStore {
         Files.createDirectories(p.getDirectory().resolve(type.collectionDirectory()));
         save(p); return p;
     }
+    /** Defaults are version-specific; never retarget or overwrite an existing user profile. */
+    public Profile ensureDefault(String version, ProfileType type) throws IOException {
+        if (type != ProfileType.MODS && type != ProfileType.MODS_SERVER) throw new IOException("Invalid default profile type");
+        String name = type.isClient() ? "Default (VANILLA)" : "Default";
+        try (ProfileLease ignored = new ProfileLease(root)) {
+            for (Profile profile : list()) if (name.equals(profile.name) && version.equals(profile.gameVersion)
+                    && "VANILLA".equals(profile.loader) && profile.type == type && !profile.template && !profile.migrationPending)
+                return profile;
+            return create(name, version, "VANILLA", type);
+        }
+    }
     public void save(Profile p) throws IOException {
         validate(p); p.setDirectory(directory(p.id)); json.write(p.getDirectory().resolve("profile.json"), p);
     }

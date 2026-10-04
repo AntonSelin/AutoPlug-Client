@@ -8,10 +8,12 @@ AutoPlug targets Java 9 or later. Minecraft runs in a separate JVM selected from
 
 Enable the existing system-tray option in AutoPlug's general configuration and click the tray icon to open the dashboard. Closing the window hides it; it does not stop AutoPlug or its running worlds. When the operating system has no system tray, the dashboard opens as a normal window.
 
-1. In **Profiles**, create a client profile with type `MODS`, a Minecraft version and a loader. A vanilla client also uses the `MODS` type, with loader `VANILLA` and an empty collection.
+The header names the current tab, and common actions have icons with text or accessible labels. Long operations show their current step and animated progress; downloads report measured byte progress when a total is known. The current source URL can be selected and copied, and **Activity details** keeps a copyable history of steps and download sources. Download URLs also appear in logs with sensitive credentials redacted. Settings keeps account and sharing controls visible in two compact columns; **Advanced** expands optional runtime overrides.
+
+1. **Profiles** starts with a playable `Default (VANILLA)` client and a matching `Default` server profile. Defaults use the configured Minecraft version, initially `1.21.1`, and do not download the game until needed. An existing usable default preference is preserved; a template or pending migration is replaced as the launch default without changing that profile. Version-specific defaults are reused rather than retargeting an existing profile. Create additional client profiles with type `MODS`, a Minecraft version and a loader. Vanilla also uses `MODS`, with loader `VANILLA` and an empty collection.
 2. Add mod or plugin JARs to the profile's collection directory, available through **Open folder**, or use `.profiles add` below. Provider identities in `collection.json` allow version-aware update checks; `.profiles add --modrinth` records a Modrinth project ID or slug.
 3. In **Settings**, select an offline player name or sign in with Microsoft. Configure runtime overrides only if automatic selection is unsuitable.
-4. Use **Launch client**, or select a server in **Server Browser** and choose a compatible client profile. The browser shows Minecraft version, MOTD, player count and latency through AutoPlug's existing status ping. A server's reported version is not proof that every installed mod will be compatible; review the selected loader and collection.
+4. Use **Launch client**, or select a server in **Server Browser** and choose a compatible client profile. If no client profiles exist, the dashboard prepares defaults before continuing. The browser shows Minecraft version, MOTD, player count and latency through AutoPlug's existing status ping. A server's reported version is not proof that every installed mod will be compatible; review the selected loader and collection.
 
 The browser imports favorites from the standard Minecraft `servers.dat` when the dashboard starts. Importing reads the vanilla file and keeps AutoPlug favorites separately; it does not rewrite the vanilla file. Favorites can also be added through the dashboard or CLI.
 
@@ -27,9 +29,15 @@ These previews render the actual Swing components in the default light theme wit
 
 ![Worlds dashboard with fixture singleplayer saves and managed worlds](images/native-launcher/worlds.png)
 
-**Settings:** runtime overrides, default profile, sharing preference and account controls.
+**Settings:** default profile, sharing preference and account controls, with runtime overrides under **Advanced**.
 
 ![Settings dashboard with an offline fixture account and empty Microsoft application ID](images/native-launcher/settings.png)
+
+**Server Browser:** action icons retain labels or accessible tooltips.
+
+![Server Browser with fixture favorites and action icons](images/native-launcher/server-browser.png)
+
+Additional settings previews show the [dark theme](images/native-launcher/settings-dark.png) and [compact 950 × 620 layout](images/native-launcher/settings-compact.png).
 
 ## Profiles and migration
 
@@ -106,11 +114,15 @@ Use the first command in a running AutoPlug console to keep sign-in within that 
 
 ## Existing singleplayer saves
 
-**Worlds** scans `saves/` in the standard Minecraft directory: `%APPDATA%/.minecraft` on Windows, `~/Library/Application Support/minecraft` on macOS, and `~/.minecraft` on Linux. It reads each save's `level.dat` for its name and recorded Minecraft version and uses `icon.png` when available. Refresh rescans the folder. Discovery does not copy, convert, rename or rewrite saves; malformed or linked entries are skipped with a diagnostic.
+**Worlds** scans `saves/` in the standard Minecraft directory: `%APPDATA%/.minecraft` on Windows, `~/Library/Application Support/minecraft` on macOS, and `~/.minecraft` on Linux. Its bounded `level.dat` reader exposes name, recorded version, modded status, last-played time, enabled datapacks, cheats and hardcore settings. Cards also show a validated `icon.png`, save size and Quick Play eligibility where known. Size scanning does not follow links and stops at its entry, depth or time budget; an incomplete size is labeled **At least**. Datapack display is capped. Refresh rescans the folder. Discovery does not copy, convert, rename or rewrite saves; malformed or linked entries are skipped with a diagnostic.
 
 Choose **Launch** on a singleplayer card to open the original save using Vanilla Minecraft and the account selected in Settings. The recorded game version is preserved, including the exact pre-release or release-candidate build. A save with no recorded version requires you to choose its original version explicitly; AutoPlug never chooses an upgrade automatically. Saves marked as modded must be opened using their original modded setup to preserve their contents.
 
-When the publisher's version metadata supports singleplayer Quick Play (Minecraft 1.20 and later), AutoPlug passes the save folder name directly to Minecraft. Older versions open the matching game and show instructions to choose the save from **Singleplayer**. Launching a save allows Minecraft to write its normal save, options and log files in the original game directory. Back up important saves before playing. AutoPlug serializes its launches in that shared directory and leaves Minecraft's own world locking in place.
+When the publisher's version metadata advertises singleplayer Quick Play, AutoPlug passes the save folder name directly to Minecraft. For supported pre-Quick-Play versions with Mojang client mappings (1.14 onward), a bundled Java 8 startup helper resolves the exact version's native world-entry methods. The older releases **1.7.10, 1.8.9, 1.12.2 and 1.13.2** use bundled adapters pinned to the original client JAR's SHA-1; those adapters were checked against original JAR bytecode and MCP mappings. Other pre-mapping builds, or unsupported mapping layouts, fail with an explicit compatibility error. This does not claim support for every historical snapshot.
+
+The helper schedules Minecraft's normal integrated-world loading flow on the game thread, preserving the original game folder and the save's display name. It does not invent unsupported command-line flags, convert the save to a dedicated server or bypass account authentication. A launch status confirms that the game was started with automatic entry configured; it does not prove that world loading completed. Helper validation failures and timeouts are logged. Launching allows Minecraft to write its normal save, options and log files in the original game directory. Back up important saves before playing. AutoPlug serializes its launches in that shared directory and leaves Minecraft's own world locking in place.
+
+Preparing a local launch registers a stable `world-<uuid>` ownership entry under AutoPlug's data root. This entry contains only a reference to the validated original save; it does not move or copy its contents. Repeated launches reuse the same entry and do not add duplicate cards. Existing `local:<folder>` command aliases continue to work after the displayed ID becomes `world-<uuid>`.
 
 The CLI uses the same discovered IDs and version checks:
 
@@ -124,7 +136,7 @@ Use `--version` only to supply a missing original version; an override that diff
 
 ## Managed worlds and sharing
 
-In **Worlds**, create a managed world with a server profile and a playable client profile. They must use compatible game versions and mod loaders. Each world owns a separate save directory, even when multiple worlds use the same server profile. Mod/plugin JARs are materialized from the profile; world-specific configuration and saves remain separate. An existing world icon or server icon is shown as its thumbnail when available.
+In **Worlds**, create a managed world with a server profile and a playable client profile. Matching defaults are prepared when needed; they do not accept the server EULA. The profiles must use compatible game versions and mod loaders. Each world owns a separate save directory, even when multiple worlds use the same server profile. Mod/plugin JARs are materialized from the profile; world-specific configuration and saves remain separate. An existing world icon or server icon is shown as its thumbnail when available, and the bounded save metadata appears after the world has a readable `level.dat`.
 
 Read and accept the [Minecraft EULA](https://aka.ms/MinecraftEULA) for the world before launching it. AutoPlug does not silently accept it during profile creation or server installation. The CLI flag below records that explicit choice:
 
@@ -161,6 +173,7 @@ The default data root is `~/.autoplug`, where `~` means the operating-system use
 | `profiles/<id>/` | Profile identity, collection metadata, configuration and mod/plugin collection |
 | `worlds/<id>/world.json` | World identity, profile references and recorded EULA choice |
 | `worlds/<id>/server/` | Dedicated server files, world saves and `autoplug-server.log` |
+| `worlds/world-<uuid>/local-world.json` | Metadata-only ownership reference to an existing singleplayer save; its files remain in Minecraft's original `saves/` directory |
 | `cache/` | Shared game downloads, libraries, assets, installer artifacts, content-addressed JARs and runtimes |
 | `servers.json` | AutoPlug server favorites |
 | `settings.json` | Launcher preferences and account selection |
@@ -171,12 +184,14 @@ Artifacts use hard links when possible, with symbolic-link or copy fallback. Aut
 
 ## Verification and optional live smoke checks
 
-The focused automated tests use provider fixtures, real local child JVMs, loopback Minecraft status responses and a simulated UPnP SOAP gateway. They exercise profile isolation, migration, launch arguments, account exchanges, process shutdown and mapping ownership without using a real account or changing a router.
+The focused automated tests use provider fixtures, real local child JVMs, loopback Minecraft status responses and a simulated UPnP SOAP gateway. They exercise profile isolation, migration, defaults, bounded world metadata, ownership references and CLI aliases, launch arguments, account exchanges, process shutdown and mapping ownership without using a real account or changing a router. Dashboard tests cover progress and concurrent downloads; fixture previews check light and dark layouts at 1200 × 820 and 950 × 620.
+
+Legacy automatic entry is checked with exact-version mapping fixtures, forked contract clients and original client-bytecode inspection. These checks verify method contracts and scheduling but do not establish successful interactive Minecraft gameplay. Full game loading and play were not verified in the implementation environment; unsupported historical builds are not presented as tested.
 
 From a checkout with Maven and a suitable JDK, run:
 
 ```text
-mvn "-Dtest=ProfileStoreTest,ProfileUpdatesTest,LauncherCommandsTest,LocalClientLifecycleTest,MinecraftLauncherTest,MicrosoftAccountServiceTest,JavaRuntimeManagerTest,WorldStoreTest,LocalWorldStoreTest,WorldServiceTest,MinecraftServerInstallerTest,UpnpSharingServiceTest,ServerBrowserTest,MineStatJsonTest,DashboardPanelTest" test
+mvn "-Dtest=ProfileStoreTest,ProfileUpdatesTest,LauncherDefaultsTest,LauncherCommandsTest,LocalClientLifecycleTest,MinecraftLauncherTest,LegacyWorldLaunchTest,DownloadProgressTest,LegacyDownloadProgressTest,MicrosoftAccountServiceTest,JavaRuntimeManagerTest,WorldStoreTest,LocalWorldStoreTest,WorldServiceTest,MinecraftServerInstallerTest,UpnpSharingServiceTest,ServerBrowserTest,MineStatJsonTest,DashboardPanelTest" test
 mvn -DskipTests package
 ```
 

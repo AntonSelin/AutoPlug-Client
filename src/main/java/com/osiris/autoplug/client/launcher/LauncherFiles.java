@@ -28,13 +28,25 @@ final class LauncherFiles {
     private LauncherFiles() { }
     static JsonObject json(String url) throws IOException {
         try { return JsonParser.parseString(text(url)).getAsJsonObject(); }
-        catch (RuntimeException e) { throw new IOException("Invalid JSON metadata from " + url, e); }
+        catch (RuntimeException e) { throw new IOException("Invalid JSON metadata from " + DownloadProgress.sourceUrl(url), e); }
     }
     static String text(String url) throws IOException {
-        try (Response response = HTTP.newCall(new Request.Builder().url(url).header("User-Agent", "AutoPlug/10 native-launcher").build()).execute()) {
-            if (!response.isSuccessful() || response.body() == null) throw new IOException("HTTP " + response.code() + " fetching " + url);
-            if (response.body().contentLength() > 32 * 1024 * 1024) throw new IOException("Metadata too large: " + url);
-            return response.body().string();
+        try (DownloadProgress.Transfer transfer = DownloadProgress.begin("Fetching metadata", url);
+             Response response = HTTP.newCall(new Request.Builder().url(url).header("User-Agent", "AutoPlug/10 native-launcher").build()).execute()) {
+            transfer.redirect(response.request().url().toString());
+            if (!response.isSuccessful() || response.body() == null) throw new IOException("HTTP " + response.code() + " fetching " + DownloadProgress.sourceUrl(url));
+            if (response.body().contentLength() > 32 * 1024 * 1024) throw new IOException("Metadata too large: " + DownloadProgress.sourceUrl(url));
+            try (InputStream in = response.body().byteStream(); java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream()) {
+                byte[] buffer = new byte[8192]; int count; long total = 0;
+                while ((count = in.read(buffer)) != -1) {
+                    if (Thread.currentThread().isInterrupted()) throw new java.io.InterruptedIOException("Download cancelled.");
+                    total += count;
+                    if (total > 32 * 1024 * 1024) throw new IOException("Metadata too large: " + DownloadProgress.sourceUrl(url));
+                    out.write(buffer, 0, count); transfer.update(total, response.body().contentLength());
+                }
+                transfer.complete(total, response.body().contentLength());
+                return new String(out.toByteArray(), StandardCharsets.UTF_8);
+            }
         }
     }
     static Path child(Path root, String relative) throws IOException {
@@ -72,24 +84,30 @@ final class LauncherFiles {
         if (Thread.currentThread().isInterrupted()) throw new java.io.InterruptedIOException("Download cancelled.");
         Files.createDirectories(destination.getParent());
         Path temporary = Files.createTempFile(destination.getParent(), ".download-", ".part");
-        progress.accept("Downloading " + destination.getFileName());
-        try {
+        String description = "Downloading " + destination.getFileName();
+        DownloadProgress.Transfer transfer = DownloadProgress.begin(description, url);
+        long total = 0, expected = size;
+        try (DownloadProgress.Transfer ignored = transfer) {
+            if (progress != null) progress.accept(description + " from " + DownloadProgress.sourceUrl(url));
             try (Response response = HTTP.newCall(new Request.Builder().url(url).header("User-Agent", "AutoPlug/10 native-launcher").build()).execute()) {
-                if (!response.isSuccessful() || response.body() == null) throw new IOException("HTTP " + response.code() + " fetching " + url);
+                transfer.redirect(response.request().url().toString());
+                if (!response.isSuccessful() || response.body() == null) throw new IOException("HTTP " + response.code() + " fetching " + DownloadProgress.sourceUrl(url));
+                if (expected < 0) expected = response.body().contentLength();
                 try (InputStream in = response.body().byteStream(); OutputStream out = Files.newOutputStream(temporary)) {
                     byte[] buffer = new byte[65536];
                     int count;
-                    long total = 0;
                     while ((count = in.read(buffer)) != -1) {
                         if (Thread.currentThread().isInterrupted()) throw new java.io.InterruptedIOException("Download cancelled.");
                         total += count;
                         if (size >= 0 && total > size) throw new IOException("Unexpected download size: " + destination.getFileName());
                         out.write(buffer, 0, count);
+                        transfer.update(total, expected);
                     }
                 }
             }
             if (!valid(temporary, sha1, size)) throw new IOException("Checksum or length mismatch: " + destination.getFileName());
             move(temporary, destination);
+            transfer.complete(total, expected);
             return destination;
         } finally { Files.deleteIfExists(temporary); }
     }

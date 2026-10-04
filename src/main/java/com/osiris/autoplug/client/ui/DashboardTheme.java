@@ -5,6 +5,7 @@ import javax.swing.border.EmptyBorder;
 import javax.swing.plaf.ColorUIResource;
 import java.awt.*;
 import java.awt.geom.RoundRectangle2D;
+import java.awt.geom.Path2D;
 
 /** Neutral dashboard surfaces with a consistent blue accent in light and dark themes. */
 final class DashboardTheme {
@@ -43,6 +44,57 @@ final class DashboardTheme {
 
     static Color muted() { return dark() ? new Color(0xBCC8DA) : new Color(0x526176); }
     static Color accent() { return dark() ? new Color(0x8AB8FF) : BLUE; }
+
+    /** Small original line icons inherit the control foreground in either theme. */
+    static Icon icon(String action) {
+        return new Icon() {
+            public int getIconWidth() { return 18; }
+            public int getIconHeight() { return 18; }
+            public void paintIcon(Component component, Graphics graphics, int x, int y) {
+                Graphics2D g = (Graphics2D) graphics.create();
+                try {
+                    g.translate(x, y); g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+                    g.setColor(component.isEnabled() ? component.getForeground() : muted());
+                    g.setStroke(new BasicStroke(1.6f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
+                    String key = action.toLowerCase(java.util.Locale.ROOT);
+                    if (key.contains("play") || key.contains("launch") || key.contains("join") || key.equals("start")) {
+                        Path2D p = new Path2D.Float(); p.moveTo(5, 3); p.lineTo(15, 9); p.lineTo(5, 15); p.closePath(); g.fill(p);
+                    } else if (key.contains("folder") || key.contains("configuration")) {
+                        Path2D p = new Path2D.Float(); p.moveTo(2, 5); p.lineTo(7, 5); p.lineTo(9, 7); p.lineTo(16, 7); p.lineTo(15, 15); p.lineTo(2, 15); p.closePath(); g.draw(p);
+                    } else if (key.contains("delete") || key.contains("remove")) {
+                        g.drawLine(3, 5, 15, 5); g.drawLine(7, 2, 11, 2); g.drawRoundRect(5, 5, 8, 11, 2, 2); g.drawLine(8, 8, 8, 13); g.drawLine(10, 8, 10, 13);
+                    } else if (key.contains("copy") || key.contains("clone")) {
+                        g.drawRoundRect(6, 6, 9, 10, 2, 2); g.drawLine(3, 12, 3, 2); g.drawLine(3, 2, 11, 2);
+                    } else if (key.contains("edit")) {
+                        g.drawLine(4, 13, 13, 4); g.drawLine(7, 15, 15, 7); g.drawLine(13, 4, 15, 7); g.drawLine(4, 13, 3, 16); g.drawLine(3, 16, 7, 15);
+                    } else if (key.contains("share")) {
+                        g.drawLine(5, 9, 13, 4); g.drawLine(5, 9, 13, 14); g.drawOval(2, 7, 4, 4); g.drawOval(12, 1, 4, 4); g.drawOval(12, 12, 4, 4);
+                    } else if (key.contains("refresh") || key.contains("reload") || key.contains("update") || key.contains("restart")) {
+                        g.drawArc(3, 3, 12, 12, 40, 285); g.drawLine(15, 2, 15, 7); g.drawLine(11, 7, 15, 7);
+                    } else if (key.contains("ping") || key.contains("activity") || key.contains("check")) {
+                        g.drawPolyline(new int[]{1, 5, 7, 10, 12, 17}, new int[]{10, 10, 4, 15, 9, 9}, 6);
+                    } else if (key.contains("import") || key.contains("add jar")) {
+                        g.drawLine(9, 2, 9, 11); g.drawLine(5, 7, 9, 11); g.drawLine(13, 7, 9, 11); g.drawPolyline(new int[]{3, 3, 15, 15}, new int[]{12, 16, 16, 12}, 4);
+                    } else if (key.contains("eula")) {
+                        g.drawRoundRect(3, 2, 12, 14, 2, 2); g.drawLine(6, 6, 12, 6); g.drawLine(6, 9, 12, 9); g.drawLine(6, 12, 10, 12);
+                    } else if (key.contains("settings") || key.contains("advanced")) {
+                        for (int row = 4; row <= 14; row += 5) { g.drawLine(2, row, 16, row); g.fillOval(row == 9 ? 10 : 4, row - 2, 4, 4); }
+                    } else if (key.contains("world")) {
+                        g.drawOval(2, 2, 14, 14); g.drawOval(6, 2, 6, 14); g.drawLine(2, 9, 16, 9);
+                    } else if (key.contains("server")) {
+                        g.drawRoundRect(2, 2, 14, 6, 2, 2); g.drawRoundRect(2, 10, 14, 6, 2, 2); g.fillOval(4, 4, 2, 2); g.fillOval(4, 12, 2, 2);
+                    } else if (key.contains("favorite") || key.contains("template")) {
+                        Path2D p = new Path2D.Float(); for (int n = 0; n < 10; n++) { double angle = -Math.PI / 2 + n * Math.PI / 5, r = n % 2 == 0 ? 7 : 3.2; double px = 9 + Math.cos(angle) * r, py = 9 + Math.sin(angle) * r; if (n == 0) p.moveTo(px, py); else p.lineTo(px, py); } p.closePath(); g.draw(p);
+                    } else if (key.contains("profile") || key.contains("sign in") || key.contains("offline")) {
+                        g.drawOval(6, 2, 6, 6); g.drawArc(3, 10, 12, 11, 0, 180);
+                    } else if (key.contains("save") || key.contains("back")) {
+                        g.drawRoundRect(3, 2, 12, 14, 2, 2); g.drawRect(6, 3, 6, 4); g.drawRect(6, 11, 6, 5);
+                    } else if (key.equals("stop")) g.fillRoundRect(4, 4, 10, 10, 2, 2);
+                    else { g.drawLine(3, 9, 15, 9); g.drawLine(9, 3, 9, 15); }
+                } finally { g.dispose(); }
+            }
+        };
+    }
 
     static JButton primary(JButton button) {
         button.setBackground(BLUE); button.setForeground(Color.WHITE);
@@ -146,6 +198,7 @@ final class DashboardTheme {
 
     private static final class Surface extends JPanel {
         Surface(LayoutManager layout) { super(layout); setOpaque(false); }
+        @Override public Dimension getMaximumSize() { return new Dimension(Integer.MAX_VALUE, getPreferredSize().height); }
         @Override protected void paintComponent(Graphics graphics) {
             Graphics2D g = (Graphics2D) graphics.create();
             try {

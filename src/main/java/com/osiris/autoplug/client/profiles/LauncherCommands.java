@@ -125,7 +125,12 @@ public class LauncherCommands {
         }
     }
     private LauncherActions.WorldInfo world(String id) throws Exception {
-        for (LauncherActions.WorldInfo world : services.worlds()) if (world.id.equals(id)) return world;
+        for (LauncherActions.WorldInfo world : services.worlds()) {
+            if (world.id.equals(id)) return world;
+            // Owning a save gives its visible entry a persistent world-UUID, but
+            // the documented local:<folder> CLI alias continues to identify it.
+            if (world.local && id.startsWith("local:") && id.equals("local:" + Paths.get(world.directory).getFileName())) return world;
+        }
         throw new IOException("World not found: " + id);
     }
     private LauncherActions.WorldInfo managedWorld(String id) throws Exception {

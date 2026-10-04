@@ -19,6 +19,7 @@ public class LauncherServices implements LauncherActions, AutoCloseable {
     }
     private final Path root;
     private final Consumer<String> progress;
+    private volatile Consumer<String> progressListener = ignored -> { };
     private final ProfileStore profiles;
     private final ProfileUpdates updates;
     private final WorldStore worlds;
@@ -44,7 +45,12 @@ public class LauncherServices implements LauncherActions, AutoCloseable {
     }
     /** An explicit Minecraft directory keeps local-save discovery testable without touching user saves. */
     public LauncherServices(Path root, Path minecraftDirectory, Consumer<String> progress) throws Exception {
-        this.root = root.toAbsolutePath().normalize(); this.progress = progress == null ? ignored -> { } : progress;
+        this.root = root.toAbsolutePath().normalize();
+        Consumer<String> log = progress == null ? ignored -> { } : progress;
+        this.progress = message -> {
+            try { log.accept(message); } catch (RuntimeException ignored) { }
+            try { progressListener.accept(message); } catch (RuntimeException ignored) { }
+        };
         Files.createDirectories(this.root);
         profiles = new ProfileStore(this.root.resolve("profiles")); updates = new ProfileUpdates(profiles);
         worlds = new WorldStore(this.root.resolve("worlds"));
@@ -69,11 +75,39 @@ public class LauncherServices implements LauncherActions, AutoCloseable {
         worldService = new WorldService(profiles, worlds, installer, (profile, host, port) -> launchClient(profile.id, host, port));
         worldService.setPreferredPort(state.settings.port);
         worldService.setSharingEnabled(state.settings.upnp);
+        ensureDefaultProfiles("");
     }
     public Path getRoot() { return root; }
     public ProfileStore getProfiles() { return profiles; }
     public WorldService getWorldService() { return worldService; }
     public ServerBrowserService getServers() { return servers; }
+    @Override public void onProgress(Consumer<String> listener) { progressListener = listener == null ? ignored -> { } : listener; }
+    @Override public synchronized ProfileInfo ensureDefaultProfiles(String version) throws Exception {
+        Profile selected = selectedDefault();
+        String target = version == null ? "" : version.trim();
+        if (target.isEmpty()) {
+            Profile configured = configuredDefault();
+            if (configured != null) target = configured.gameVersion;
+            else {
+                for (Profile profile : profiles.list()) if (profile.type.isClient() && !profile.template && !profile.migrationPending) { target = profile.gameVersion; break; }
+                if (target.isEmpty()) target = "1.21.1"; // Same initial version as the profile creation form; no network needed.
+            }
+        }
+        Profile client = profiles.ensureDefault(target, ProfileType.MODS);
+        profiles.ensureDefault(target, ProfileType.MODS_SERVER);
+        if (selected == null) { state.settings.defaultProfile = client.id; saveState(); }
+        return info(client);
+    }
+    private Profile selectedDefault() {
+        Profile profile = configuredDefault();
+        return profile != null && !profile.template && !profile.migrationPending ? profile : null;
+    }
+    private Profile configuredDefault() {
+        String id = state.settings.defaultProfile;
+        if (id == null || id.isEmpty()) return null;
+        try { Profile profile = profiles.get(id); return profile.type.isClient() ? profile : null; }
+        catch (IOException e) { return null; }
+    }
     @Override public List<ProfileInfo> profiles() throws Exception {
         List<ProfileInfo> result = new ArrayList<>(); for (Profile p : profiles.list()) result.add(info(p)); return result;
     }
@@ -123,8 +157,12 @@ public class LauncherServices implements LauncherActions, AutoCloseable {
     @Override public List<WorldInfo> worlds() throws Exception {
         List<WorldInfo> result = new ArrayList<>();
         try {
-            for (LocalWorld world : localWorlds.list()) result.add(new WorldInfo(world.id, world.name, "", "", world.directory.toString(),
-                    world.icon == null ? null : world.icon.toString(), localClients.containsKey(world.id), true, world.gameVersion));
+            for (LocalWorld world : localWorlds.list()) {
+                LocalWorld owned = world;
+                try { owned = worlds.ownedLocal(world, false); }
+                catch (IOException e) { progress.accept("Could not load ownership for '" + world.name + "': " + e.getMessage()); }
+                result.add(info(owned));
+            }
         } catch (IOException | SecurityException e) {
             progress.accept("Could not list local Minecraft saves: " + e.getMessage());
         }
@@ -132,7 +170,7 @@ public class LauncherServices implements LauncherActions, AutoCloseable {
         return result;
     }
     @Override public String launchLocalWorld(String id, String version) throws Exception {
-        LocalWorld world = localWorlds.get(id);
+        LocalWorld world = worlds.getLocal(id, localWorlds);
         String selected = localWorlds.launchVersion(world, version);
         // All standard saves share one game directory and its settings/native files.
         // Retain one lease for that directory until the child exits, including preparation failures.
@@ -141,15 +179,15 @@ public class LauncherServices implements LauncherActions, AutoCloseable {
             MinecraftAccount current = currentAccount();
             PreparedLaunch prepared = launcher.prepare(new LaunchRequest(world.gameDirectory, selected, "VANILLA", null,
                     current, null, 0, world.saveName()), progress);
-            LocalWorld fresh = localWorlds.get(id);
+            LocalWorld fresh = worlds.getLocal(id, localWorlds);
             if (!fresh.gameVersion.equals(world.gameVersion) || fresh.modded != world.modded)
                 throw new IOException("The save's version metadata changed while preparing Minecraft. Refresh and select it again.");
             localWorlds.launchVersion(fresh, selected);
-            Process process = launcher.launch(prepared); trackLocalClient(id, process, lease);
+            LocalWorld owned = worlds.registerLocal(fresh);
+            Process process = launcher.launch(prepared); trackLocalClient(owned.id, process, lease);
             if (prepared.arguments.contains("--quickPlaySingleplayer"))
                 return "Started Minecraft " + selected + " with Quick Play for '" + world.name + "'.";
-            return "Started Minecraft " + selected + ". This version does not support direct world launch; choose '" + world.name
-                    + "' (folder " + world.saveName() + ") from Singleplayer.";
+            return "Started Minecraft " + selected + " with automatic entry for '" + world.name + "'.";
         } catch (Exception e) { lease.close(); throw e; }
     }
     /** Existing saves must be closed from Minecraft so its integrated server can save normally. */
@@ -162,6 +200,12 @@ public class LauncherServices implements LauncherActions, AutoCloseable {
         });
     }
     @Override public WorldInfo createWorld(String name, String serverProfileId, String clientProfileId) throws Exception {
+        if (clientProfileId == null || clientProfileId.trim().isEmpty()) {
+            String version = serverProfileId == null || serverProfileId.trim().isEmpty() ? "" : profiles.get(serverProfileId).gameVersion;
+            clientProfileId = ensureDefaultProfiles(version).id;
+        }
+        if (serverProfileId == null || serverProfileId.trim().isEmpty())
+            serverProfileId = profiles.ensureDefault(profiles.get(clientProfileId).gameVersion, ProfileType.MODS_SERVER).id;
         Profile server = profiles.get(serverProfileId), client = profiles.get(clientProfileId);
         if (server.type.isClient() || !client.type.isClient()) throw new IOException("Choose a server profile and a client profile");
         if (!server.gameVersion.equals(client.gameVersion)) throw new IOException("World server and client must use the same game version");
@@ -186,6 +230,9 @@ public class LauncherServices implements LauncherActions, AutoCloseable {
     }
     @Override public void launchProfile(String id, String host, int port) throws Exception { launchClient(id, host, port); }
     private Process launchClient(String id, String host, int port) throws Exception {
+        if (id == null || id.trim().isEmpty()) {
+            synchronized (this) { Profile selected = selectedDefault(); id = selected == null ? ensureDefaultProfiles("").id : selected.id; }
+        }
         Profile profile = profiles.get(id);
         if (!profile.type.isClient()) throw new IOException("Choose a MODS client profile");
         if (profile.template) throw new IOException("Clone the template before launching it");
@@ -196,8 +243,8 @@ public class LauncherServices implements LauncherActions, AutoCloseable {
             if (current == null) current = currentAccount();
             else if (current.needsRefresh()) current = microsoft.refresh(current);
             PreparedLaunch prepared = launcher.prepare(new LaunchRequest(profile.getDirectory(), profile.gameVersion, profile.loader, profile.loaderVersion, current, host, port), progress);
-            Process process = launcher.launch(prepared); clients.put(id, process);
-            process.onExit().thenRun(() -> { clients.remove(id, process); try { lease.close(); } catch (IOException e) { progress.accept("Could not release profile lock: " + e.getMessage()); } });
+            Process process = launcher.launch(prepared); clients.put(profile.id, process);
+            process.onExit().thenRun(() -> { clients.remove(profile.id, process); try { lease.close(); } catch (IOException e) { progress.accept("Could not release profile lock: " + e.getMessage()); } });
             return process;
         } catch (Exception e) { lease.close(); throw e; }
     }
@@ -256,7 +303,21 @@ public class LauncherServices implements LauncherActions, AutoCloseable {
     private ProfileInfo info(Profile p) { return new ProfileInfo(p.id, p.name, p.gameVersion, p.loader, p.type.name(), p.getDirectory().toString(), p.template, p.migrationSummary == null ? "" : p.migrationSummary, !p.migrationPending); }
     private WorldInfo info(VirtualWorld w) throws IOException {
         boolean running = worldService.activeSessions().stream().anyMatch(s -> s.getWorld().id.equals(w.id));
-        return new WorldInfo(w.id, w.name, w.serverProfileId, w.clientProfileId, worlds.getDirectory(w.id).toString(), w.thumbnail, running);
+        Path directory = worlds.getDirectory(w.id);
+        if (Files.isRegularFile(directory.resolve("world/level.dat"), LinkOption.NOFOLLOW_LINKS)) {
+            try {
+                LocalWorld metadata = LocalWorldStore.inspect(w.id, directory.resolve("world"), directory);
+                return new WorldInfo(w.id, w.name, w.serverProfileId, w.clientProfileId, directory.toString(), metadata.icon == null ? w.thumbnail : metadata.icon.toString(), running,
+                        false, metadata.gameVersion, metadata.modded, metadata.lastPlayed, metadata.sizeBytes, metadata.sizeComplete,
+                        metadata.dataPacks, metadata.cheats, metadata.hardcore, false);
+            } catch (IOException e) { progress.accept("Could not read world details for '" + w.name + "': " + e.getMessage()); }
+        }
+        return new WorldInfo(w.id, w.name, w.serverProfileId, w.clientProfileId, directory.toString(), w.thumbnail, running, false, profiles.get(w.serverProfileId).gameVersion);
+    }
+    private WorldInfo info(LocalWorld world) {
+        return new WorldInfo(world.id, world.name, "", "", world.directory.toString(), world.icon == null ? null : world.icon.toString(),
+                localClients.containsKey(world.id), true, world.gameVersion, world.modded, world.lastPlayed, world.sizeBytes, world.sizeComplete,
+                world.dataPacks, world.cheats, world.hardcore, world.quickPlayEligible);
     }
     public void waitForSessions() throws InterruptedException {
         while (!clients.isEmpty() || !localClients.isEmpty() || !worldService.activeSessions().isEmpty()) Thread.sleep(250);

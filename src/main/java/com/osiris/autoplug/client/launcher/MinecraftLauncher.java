@@ -64,14 +64,25 @@ public class MinecraftLauncher {
             download(descriptor, logging, log);
         }
         List<String> args = buildArguments(metadata, request, classpath, natives, assets, assetId, logging);
-        if (request.singleplayerWorld != null && !args.contains("--quickPlaySingleplayer"))
-            log.accept("Minecraft " + request.version + " has no supported singleplayer Quick Play argument. Select '" + request.singleplayerWorld + "' manually in Singleplayer.");
+        List<Path> temporaryFiles = new ArrayList<>();
+        if (request.singleplayerWorld != null && !args.contains("--quickPlaySingleplayer")) {
+            LegacyWorldLaunch legacy = LegacyWorldLaunch.prepare(cacheRoot, vanilla, request, log);
+            args.add(0, legacy.argument());
+            temporaryFiles.add(legacy.configuration);
+            log.accept("Minecraft " + request.version + " will enter the selected save automatically through its integrated-world loading flow.");
+        }
         log.accept("Minecraft " + id + " is ready (Java " + major + ")");
-        return new PreparedLaunch(java, request.gameDir, args, id, major);
+        return new PreparedLaunch(java, request.gameDir, args, id, major, temporaryFiles);
     }
 
     /** Minecraft's output is written inside this profile and is never mixed with another world's console. */
     public Process launch(PreparedLaunch prepared) throws IOException {
+        List<Path> cleanup = new ArrayList<>(prepared.temporaryFiles);
+        try { return start(prepared, cleanup); }
+        catch (IOException | RuntimeException failure) { cleanup.forEach(MinecraftLauncher::deleteTemporary); throw failure; }
+    }
+
+    private Process start(PreparedLaunch prepared, List<Path> cleanup) throws IOException {
         Path logs = prepared.gameDir.resolve("logs");
         Files.createDirectories(logs);
         // Loader classpaths can exceed Windows' command-line limit. Java 9+ accepts a private
@@ -81,6 +92,7 @@ public class MinecraftLauncher {
         if (prepared.javaMajor >= 9) {
             Path state = prepared.gameDir.resolve(".autoplug"); Files.createDirectories(state);
             argumentsFile = Files.createTempFile(state, "launch-", ".args");
+            cleanup.add(argumentsFile);
             try {
                 AccountStore.restrict(argumentsFile);
                 List<String> lines = new ArrayList<>();
@@ -90,25 +102,28 @@ public class MinecraftLauncher {
                 command = java.util.Arrays.asList(prepared.executable.toString(), "@" + argumentsFile);
             } catch (IOException | RuntimeException e) { Files.deleteIfExists(argumentsFile); throw e; }
         }
-        final Path cleanup = argumentsFile;
         try {
             Process process = new ProcessBuilder(command).directory(prepared.gameDir.toFile()).redirectErrorStream(true)
                     .redirectOutput(ProcessBuilder.Redirect.appendTo(logs.resolve("autoplug-launcher.log").toFile())).start();
-            if (cleanup != null) {
-                cleanup.toFile().deleteOnExit();
+            if (!cleanup.isEmpty()) {
+                cleanup.forEach(path -> path.toFile().deleteOnExit());
                 // A non-daemon session thread also makes one-shot CLI launches wait for their
                 // client and guarantees cleanup before normal JVM shutdown. A daemon future can
                 // be lost when the launching CLI exits immediately after the game does.
                 Thread cleanupThread = new Thread(() -> {
                     try { process.waitFor(); }
                     catch (InterruptedException e) { Thread.currentThread().interrupt(); }
-                    finally { try { Files.deleteIfExists(cleanup); } catch (IOException ignored) { /* deleteOnExit remains registered */ } }
+                    finally { cleanup.forEach(MinecraftLauncher::deleteTemporary); }
                 }, "Minecraft session cleanup");
                 cleanupThread.setDaemon(false);
                 cleanupThread.start();
             }
             return process;
-        } catch (IOException e) { if (cleanup != null) Files.deleteIfExists(cleanup); throw e; }
+        } catch (IOException e) { cleanup.forEach(MinecraftLauncher::deleteTemporary); throw e; }
+    }
+
+    private static void deleteTemporary(Path path) {
+        try { Files.deleteIfExists(path); } catch (IOException ignored) { path.toFile().deleteOnExit(); }
     }
 
     static String quoteArgumentFile(String argument) {
