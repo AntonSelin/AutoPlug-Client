@@ -186,7 +186,9 @@ Artifacts use hard links when possible, with symbolic-link or copy fallback. Aut
 
 ## Verification and optional live smoke checks
 
-The focused automated tests use provider fixtures, real local child JVMs, loopback Minecraft status responses and a simulated UPnP SOAP gateway. They exercise profile isolation, migration, defaults, bounded world metadata, ownership references and CLI aliases, launch arguments, account exchanges, process shutdown and mapping ownership without using a real account or changing a router. Dashboard tests cover progress and concurrent downloads; fixture previews check light and dark layouts at 1200 × 820 and 950 × 620.
+The focused automated tests use provider fixtures, real local child JVMs, loopback Minecraft status responses and a simulated UPnP SOAP gateway. They exercise profile isolation, migration, defaults, bounded world metadata, ownership references and CLI aliases, launch arguments, account exchanges, process shutdown and mapping ownership without using a real account or changing a router. Dashboard tests cover progress, concurrent downloads and synchronous layout invalidation while measuring Settings. Settings and world-card stacks use GridBagLayout so wrapped text can invalidate its ancestors without clearing BoxLayout's in-progress measurement arrays. Fixture previews check light and dark layouts at 1200 × 820 and 950 × 620.
+
+`DashboardDisplayableTest` additionally creates hidden native Swing peers, validates the actual window/scroll-pane hierarchy, and resizes both themes repeatedly across the Settings column breakpoint. It checks Advanced controls, preserved field edits, scroll reachability, world-card bounds and uncaught event-thread exceptions. It requires a desktop environment, skips in headless mode, and never shows a window or contacts game services. This is automated window-lifecycle coverage, not human acceptance testing or interactive gameplay.
 
 Legacy automatic entry is checked with exact-version mapping fixtures, forked contract clients and original client-bytecode inspection. These checks verify method contracts and scheduling but do not establish successful interactive Minecraft gameplay. Full game loading and play were not verified in the implementation environment; unsupported historical builds are not presented as tested.
 
@@ -195,6 +197,12 @@ From a checkout with Maven and a suitable JDK, run:
 ```text
 mvn "-Dtest=ProfileStoreTest,ProfileUpdatesTest,LauncherDefaultsTest,LauncherCommandsTest,LocalClientLifecycleTest,MinecraftLauncherTest,LegacyWorldLaunchTest,DownloadProgressTest,LegacyDownloadProgressTest,MicrosoftAccountServiceTest,JavaRuntimeManagerTest,WorldStoreTest,LocalWorldStoreTest,WorldServiceTest,MinecraftServerInstallerTest,UpnpSharingServiceTest,ServerBrowserTest,MineStatJsonTest,DashboardPanelTest" test
 mvn -DskipTests package
+```
+
+On a desktop host, run the additional window-lifecycle check explicitly:
+
+```text
+mvn -Djava.awt.headless=false -Dtest=DashboardDisplayableTest test
 ```
 
 The dependency-inclusive executable is `target/AutoPlug-Client.jar`. A live download/client smoke check is optional and contacts the official game/runtime providers; it may download substantial assets and opens a Minecraft window:

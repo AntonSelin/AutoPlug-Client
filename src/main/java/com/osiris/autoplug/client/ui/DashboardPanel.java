@@ -572,7 +572,7 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
         JPanel controls = DashboardTheme.surface(new BorderLayout(), 8);
         controls.add(toolbar(primaryButton("Create world", this::createWorld), button("Refresh", this::refreshWorlds)));
         content.add(controls, BorderLayout.NORTH);
-        worldCards.setLayout(new BoxLayout(worldCards, BoxLayout.Y_AXIS));
+        worldCards.setLayout(DashboardTheme.verticalStack());
         worldCards.setOpaque(false);
         JScrollPane scroll = DashboardTheme.scroll(worldCards);
         content.add(scroll, BorderLayout.CENTER);
@@ -663,7 +663,10 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
             nameWorldActions(card, world.name);
             worldCards.add(card); worldCards.add(Box.createVerticalStrut(12));
         }
-        worldCards.add(Box.createVerticalGlue()); worldCards.revalidate(); worldCards.repaint();
+        GridBagConstraints remaining = new GridBagConstraints();
+        remaining.gridx = 0; remaining.gridy = GridBagConstraints.RELATIVE; remaining.weightx = 1; remaining.weighty = 1;
+        remaining.fill = GridBagConstraints.BOTH;
+        worldCards.add(Box.createVerticalGlue(), remaining); worldCards.revalidate(); worldCards.repaint();
     }
 
     static String worldMetadata(WorldInfo world) {
@@ -777,7 +780,7 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
         runtime.setVisible(false); advanced.add(runtime);
         alignGroup(identity); alignGroup(defaults); alignGroup(advanced);
         disclosure.addActionListener(e -> { runtime.setVisible(disclosure.isSelected()); disclosure.setText(disclosure.isSelected() ? "Advanced −" : "Advanced"); page.revalidate(); });
-        JPanel right = DashboardTheme.transparent(null); right.setLayout(new BoxLayout(right, BoxLayout.Y_AXIS));
+        JPanel right = DashboardTheme.transparent(DashboardTheme.verticalStack());
         right.add(defaults); right.add(Box.createVerticalStrut(12)); right.add(advanced);
         ResponsiveSettings settings = new ResponsiveSettings(identity, right); settings.setName("responsive-settings");
         page.add(DashboardTheme.scroll(settings), BorderLayout.CENTER);
@@ -787,7 +790,7 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
     }
 
     private static JPanel settingsGroup(String title) {
-        JPanel panel = DashboardTheme.surface(null, 16); panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
+        JPanel panel = DashboardTheme.surface(DashboardTheme.verticalStack(), 16);
         panel.setAlignmentX(Component.LEFT_ALIGNMENT);
         if (title != null) panel.add(section(title));
         return panel;

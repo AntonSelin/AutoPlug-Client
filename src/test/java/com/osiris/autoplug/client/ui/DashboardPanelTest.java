@@ -101,6 +101,39 @@ class DashboardPanelTest {
         } finally { SwingUtilities.invokeAndWait(() -> panel.get().close()); }
     }
 
+    @Test void settingsMeasurementSurvivesChildLayoutInvalidation() throws Exception {
+        AtomicReference<DashboardPanel> panel = new AtomicReference<>();
+        SwingUtilities.invokeAndWait(() -> panel.set(new DashboardPanel(new LauncherActions() {}, new ServerBrowserService(directory.resolve("servers.json"), directory.resolve("servers.dat")), false)));
+        try {
+            awaitUi(() -> !findNamed(panel.get(), "activity-progress").isVisible());
+            SwingUtilities.invokeAndWait(() -> {
+                findButton(panel.get(), "Settings").doClick();
+                findButton(panel.get(), "Advanced").doClick();
+                Container responsive = findNamed(panel.get(), "responsive-settings");
+                JScrollPane scroll = (JScrollPane) SwingUtilities.getAncestorOfClass(JScrollPane.class, responsive);
+                for (Container group : new Container[]{findNamed(panel.get(), "settings-account"), findNamed(panel.get(), "settings-defaults"), findNamed(panel.get(), "settings-advanced"), (Container) responsive.getComponent(1)}) {
+                    AtomicBoolean invalidated = new AtomicBoolean();
+                    // Wrapped text can synchronously invalidate an ancestor while Swing measures it.
+                    // Force that lifecycle event once, including in headless CI.
+                    JTextArea wrapped = new JTextArea("A wrapped text measurement invalidates its containing layout.") {
+                        @Override public Dimension getPreferredSize() {
+                            if (getParent() != null && invalidated.compareAndSet(false, true)) {
+                                LayoutManager manager = getParent().getLayout();
+                                if (manager instanceof LayoutManager2) ((LayoutManager2) manager).invalidateLayout(getParent());
+                            }
+                            return super.getPreferredSize();
+                        }
+                    };
+                    wrapped.setLineWrap(true); group.add(wrapped);
+                    scroll.setSize(620, 350); scroll.doLayout();
+                    assertTrue(invalidated.get(), "Regression must actually invalidate during measurement");
+                    assertTrue(responsive.getPreferredSize().height > 0);
+                    group.remove(wrapped);
+                }
+            });
+        } finally { SwingUtilities.invokeAndWait(() -> panel.get().close()); }
+    }
+
     @Test void serverCardJoinKeepsAddressThroughRefreshDuringDefaultPreparation() throws Exception {
         CountDownLatch preparing = new CountDownLatch(1), release = new CountDownLatch(1), launched = new CountDownLatch(1);
         AtomicBoolean prepared = new AtomicBoolean(); AtomicReference<List<String>> request = new AtomicReference<>();

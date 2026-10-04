@@ -160,6 +160,19 @@ final class DashboardTheme {
         JPanel panel = new JPanel(layout); panel.setOpaque(false); return panel;
     }
 
+    /** Wrapped text may invalidate ancestors during measurement; avoid BoxLayout's mutable size caches. */
+    static GridBagLayout verticalStack() { return new VerticalStackLayout(); }
+
+    private static final class VerticalStackLayout extends GridBagLayout {
+        VerticalStackLayout() {
+            defaultConstraints.gridx = 0;
+            defaultConstraints.gridy = GridBagConstraints.RELATIVE;
+            defaultConstraints.weightx = 1;
+            defaultConstraints.fill = GridBagConstraints.HORIZONTAL;
+            defaultConstraints.anchor = GridBagConstraints.NORTHWEST;
+        }
+    }
+
     static JPanel surface(LayoutManager layout, int padding) {
         JPanel panel = new Surface(layout);
         panel.setBorder(new EmptyBorder(padding, padding, padding, padding));
