@@ -20,6 +20,8 @@ public interface LauncherActions {
     default WorldInfo createWorld(String name, String serverProfileId, String clientProfileId) throws Exception { throw unavailable(); }
     default void setWorldEulaAccepted(String id, boolean accepted) throws Exception { throw unavailable(); }
     default void launchWorld(String id, boolean share) throws Exception { throw unavailable(); }
+    /** Opens an existing singleplayer save and returns instructions if the game needs manual selection. */
+    default String launchLocalWorld(String id, String version) throws Exception { throw unavailable(); }
     default String shareWorld(String id) throws Exception { throw unavailable(); }
     default void launchProfile(String profileId, String host, int port) throws Exception { throw unavailable(); }
     default SettingsInfo settings() throws Exception { return new SettingsInfo(); }
@@ -47,11 +49,14 @@ public interface LauncherActions {
     }
 
     final class WorldInfo {
-        public final String id, name, serverProfileId, clientProfileId, directory, thumbnail;
-        public final boolean running;
+        public final String id, name, serverProfileId, clientProfileId, directory, thumbnail, gameVersion;
+        public final boolean running, local;
         public WorldInfo(String id, String name, String serverProfileId, String clientProfileId, String directory, String thumbnail, boolean running) {
+            this(id, name, serverProfileId, clientProfileId, directory, thumbnail, running, false, "");
+        }
+        public WorldInfo(String id, String name, String serverProfileId, String clientProfileId, String directory, String thumbnail, boolean running, boolean local, String gameVersion) {
             this.id = id; this.name = name; this.serverProfileId = serverProfileId; this.clientProfileId = clientProfileId; this.directory = directory;
-            this.thumbnail = thumbnail; this.running = running;
+            this.thumbnail = thumbnail; this.running = running; this.local = local; this.gameVersion = gameVersion == null ? "" : gameVersion;
         }
         @Override public String toString() { return name; }
     }

@@ -12,28 +12,36 @@ public final class VanillaServersReader {
 
     public List<SavedServer> read(Path file) throws IOException {
         if (!Files.exists(file)) return Collections.emptyList();
-        if (Files.size(file) > MAX_BYTES) throw new IOException("servers.dat exceeds the 16 MiB import limit.");
+        Map<String, Object> root = readCompound(file);
+        List<SavedServer> result = new ArrayList<>();
+        Object servers = root.get("servers");
+        if (!(servers instanceof List<?>)) return result;
+        for (Object value : (List<?>) servers) {
+            if (!(value instanceof Map<?, ?>)) continue;
+            Map<?, ?> entry = (Map<?, ?>) value;
+            if (!(entry.get("ip") instanceof String)) continue;
+            try {
+                result.add(new SavedServer(entry.get("name") instanceof String ? (String) entry.get("name") : "", (String) entry.get("ip")));
+            } catch (IllegalArgumentException ignored) { /* An invalid favorite must not hide valid entries. */ }
+        }
+        return result;
+    }
+
+    /** Shared bounded decoder for servers.dat and read-only local level.dat metadata. */
+    @SuppressWarnings("unchecked")
+    public Map<String, Object> readCompound(Path file) throws IOException {
+        if (Files.size(file) > MAX_BYTES) throw new IOException("NBT file exceeds the 16 MiB import limit.");
         try (BufferedInputStream raw = new BufferedInputStream(Files.newInputStream(file))) {
             raw.mark(2);
             int first = raw.read(), second = raw.read();
             raw.reset();
             InputStream decoded = first == 0x1f && second == 0x8b ? new GZIPInputStream(raw) : raw;
             try (DataInputStream input = new DataInputStream(new LimitedStream(decoded))) {
-                if (input.readUnsignedByte() != 10) throw new IOException("servers.dat must contain an NBT compound.");
+                if (input.readUnsignedByte() != 10) throw new IOException("NBT file must contain a compound.");
                 input.readUTF();
-                Object root = readValue(input, 10, 0, new int[]{100000});
-                List<SavedServer> result = new ArrayList<>();
-                Object servers = ((Map<?, ?>) root).get("servers");
-                if (!(servers instanceof List<?>)) return result;
-                for (Object value : (List<?>) servers) {
-                    if (!(value instanceof Map<?, ?>)) continue;
-                    Map<?, ?> entry = (Map<?, ?>) value;
-                    if (!(entry.get("ip") instanceof String)) continue;
-                    try {
-                        result.add(new SavedServer(entry.get("name") instanceof String ? (String) entry.get("name") : "", (String) entry.get("ip")));
-                    } catch (IllegalArgumentException ignored) { /* An invalid favorite must not hide valid entries. */ }
-                }
-                return result;
+                Map<String, Object> root = (Map<String, Object>) readValue(input, 10, 0, new int[]{100000});
+                if (input.read() != -1) throw new IOException("Trailing data in NBT file.");
+                return root;
             }
         }
     }
@@ -63,6 +71,7 @@ public final class VanillaServersReader {
                     if (child == 0) return compound;
                     if (i == MAX_ITEMS) throw new IOException("Too many NBT compound entries.");
                     String name = input.readUTF();
+                    if (compound.containsKey(name)) throw new IOException("Duplicate NBT compound entry: " + name);
                     compound.put(name, readValue(input, child, depth + 1, budget));
                 }
                 throw new IOException("Invalid NBT compound.");

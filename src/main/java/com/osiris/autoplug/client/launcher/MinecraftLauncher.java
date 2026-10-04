@@ -64,6 +64,8 @@ public class MinecraftLauncher {
             download(descriptor, logging, log);
         }
         List<String> args = buildArguments(metadata, request, classpath, natives, assets, assetId, logging);
+        if (request.singleplayerWorld != null && !args.contains("--quickPlaySingleplayer"))
+            log.accept("Minecraft " + request.version + " has no supported singleplayer Quick Play argument. Select '" + request.singleplayerWorld + "' manually in Singleplayer.");
         log.accept("Minecraft " + id + " is ready (Java " + major + ")");
         return new PreparedLaunch(java, request.gameDir, args, id, major);
     }
@@ -305,16 +307,19 @@ public class MinecraftLauncher {
         values.put("game_assets", assets.resolve("virtual").resolve(assetId).toString());
         List<String> classpathStrings = new ArrayList<>(); for (Path path : classpath) classpathStrings.add(path.toString());
         values.put("classpath", String.join(File.pathSeparator, classpathStrings));
-        boolean quickPlay = request.serverHost != null && metadata.has("arguments")
-                && metadata.getAsJsonObject("arguments").toString().contains("${quickPlayMultiplayer}");
+        boolean quickPlay = request.serverHost != null && supportsQuickPlay(metadata, "${quickPlayMultiplayer}");
+        boolean quickSingleplayer = request.singleplayerWorld != null && supportsQuickPlay(metadata, "${quickPlaySingleplayer}");
         Map<String, Boolean> features = new HashMap<>();
         features.put("is_quick_play_multiplayer", quickPlay);
-        features.put("has_quick_plays_support", quickPlay);
+        features.put("is_quick_play_singleplayer", quickSingleplayer);
+        features.put("has_quick_plays_support", quickPlay || quickSingleplayer);
+        if (quickSingleplayer) values.put("quickPlaySingleplayer", request.singleplayerWorld);
         if (quickPlay) {
             String host = request.serverHost.contains(":") && !request.serverHost.startsWith("[") ? "[" + request.serverHost + "]" : request.serverHost;
             values.put("quickPlayMultiplayer", host + ":" + request.serverPort);
-            values.put("quickPlayPath", request.gameDir.resolve("logs").resolve("quick-play.json").toString());
         }
+        if (quickPlay || quickSingleplayer)
+            values.put("quickPlayPath", request.gameDir.resolve("logs").resolve("quick-play.json").toString());
         List<String> args = new ArrayList<>();
         args.add("-Xmx2G");
         if (metadata.has("arguments") && metadata.getAsJsonObject("arguments").has("jvm"))
@@ -338,6 +343,17 @@ public class MinecraftLauncher {
             args.add("--server"); args.add(request.serverHost); args.add("--port"); args.add(Integer.toString(request.serverPort));
         }
         return args;
+    }
+    private static boolean supportsQuickPlay(JsonObject metadata, String placeholder) {
+        if (!metadata.has("arguments") || !metadata.getAsJsonObject("arguments").has("game")) return false;
+        for (JsonElement argument : metadata.getAsJsonObject("arguments").getAsJsonArray("game")) {
+            JsonElement value = argument.isJsonPrimitive() ? argument : argument.getAsJsonObject().get("value");
+            if (value == null) continue;
+            if (value.isJsonPrimitive() && placeholder.equals(value.getAsString())) return true;
+            if (value.isJsonArray()) for (JsonElement element : value.getAsJsonArray())
+                if (element.isJsonPrimitive() && placeholder.equals(element.getAsString())) return true;
+        }
+        return false;
     }
     private static void expand(JsonArray array, Map<String, String> values, Map<String, Boolean> features, List<String> output) throws IOException {
         for (JsonElement item : array) {

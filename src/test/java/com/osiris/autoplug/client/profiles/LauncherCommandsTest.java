@@ -18,7 +18,7 @@ class LauncherCommandsTest {
     }
     @Test void commandsPersistProfilesAndSettingsAcrossInvocationsWithoutGlobalConfig() throws Exception {
         List<String> output = new ArrayList<>(); String id;
-        try (LauncherServices services = new LauncherServices(temp, output::add)) {
+        try (LauncherServices services = new LauncherServices(temp, temp.resolve("minecraft"), output::add)) {
             LauncherCommands commands = new LauncherCommands(services, output::add);
             commands.execute(commands.tokenize(".profiles create \"My Pack\" 1.21.1 FABRIC --template"));
             id = services.profiles().get(0).id;
@@ -28,7 +28,7 @@ class LauncherCommandsTest {
             assertFalse(Files.exists(temp.resolve("autoplug"))); // No legacy server initialization.
             assertFalse(Files.exists(temp.resolve("accounts.json"))); // Offline setting creates no credential store.
         }
-        try (LauncherServices services = new LauncherServices(temp, output::add)) {
+        try (LauncherServices services = new LauncherServices(temp, temp.resolve("minecraft"), output::add)) {
             assertEquals("FixtureUser (offline)", services.settings().account);
             assertEquals(25570, services.settings().port); assertFalse(services.settings().upnp);
             assertEquals(id, services.settings().defaultProfile);
@@ -40,7 +40,7 @@ class LauncherCommandsTest {
         }
     }
     @Test void updateNeedsReviewedPlanAndWorldProfileCompatibilityIsCheckedEarly() throws Exception {
-        try (LauncherServices services = new LauncherServices(temp, ignored -> { })) {
+        try (LauncherServices services = new LauncherServices(temp, temp.resolve("minecraft"), ignored -> { })) {
             LauncherActions.ProfileInfo client = services.createProfile("Client", "1.21.1", "FABRIC", "MODS", false);
             LauncherActions.ProfileInfo server = services.createProfile("Server", "1.21.1", "FORGE", "MODS_SERVER", false);
             assertThrows(java.io.IOException.class, () -> services.updateProfile(client.id));
@@ -50,7 +50,7 @@ class LauncherCommandsTest {
         }
     }
     @Test void disablingRememberClearsAccountsEvenAfterSwitchingOffline() throws Exception {
-        try (LauncherServices services = new LauncherServices(temp, ignored -> { })) {
+        try (LauncherServices services = new LauncherServices(temp, temp.resolve("minecraft"), ignored -> { })) {
             LauncherActions.SettingsInfo settings = services.settings(); settings.rememberAccount = true; services.saveSettings(settings);
             com.osiris.autoplug.client.launcher.AccountStore store = new com.osiris.autoplug.client.launcher.AccountStore(temp.resolve("accounts.json"));
             store.save(new com.osiris.autoplug.client.launcher.MinecraftAccount("FixtureOne", "123456781234123412341234567890ab", "test-access", "test-refresh", "test-client", "", false, java.time.Instant.now().plusSeconds(3600)));
@@ -58,6 +58,34 @@ class LauncherCommandsTest {
             services.useOfflineAccount("Offline");
             settings = services.settings(); settings.rememberAccount = false; services.saveSettings(settings);
             assertTrue(store.list().isEmpty());
+        }
+    }
+    @Test void localWorldLaunchUsesRecordedVersionAndCannotStartOrShareAServer() throws Exception {
+        List<String> output = new ArrayList<>(), launches = new ArrayList<>();
+        try (LauncherServices services = new LauncherServices(temp, temp.resolve("minecraft"), output::add) {
+            @Override public List<LauncherActions.WorldInfo> worlds() {
+                return Arrays.asList(
+                        new LauncherActions.WorldInfo("local:New World", "My save", "", "", "fixture", "", false, true, "1.21.1"),
+                        new LauncherActions.WorldInfo("local:Legacy", "Legacy", "", "", "fixture", "", false, true, ""));
+            }
+            @Override public String launchLocalWorld(String id, String version) { launches.add(id + " | " + version); return "Select Singleplayer in Minecraft."; }
+            @Override public void launchWorld(String id, boolean share) { fail("A local save must not start a dedicated server"); }
+            @Override public void setWorldEulaAccepted(String id, boolean accepted) { fail("A local save must not write a server EULA"); }
+        }) {
+            LauncherCommands commands = new LauncherCommands(services, output::add);
+            commands.execute(commands.tokenize(".mc worlds launch \"local:New World\""));
+            assertEquals(Collections.singletonList("local:New World | 1.21.1"), launches);
+            assertEquals("Select Singleplayer in Minecraft.", output.get(output.size() - 1));
+            assertThrows(java.io.IOException.class, () -> commands.execute(commands.tokenize(".mc worlds launch local:Legacy")));
+            commands.execute(commands.tokenize(".mc worlds launch local:Legacy --version 1.12.2"));
+            assertEquals("local:Legacy | 1.12.2", launches.get(1));
+            assertThrows(java.io.IOException.class, () -> commands.execute(commands.tokenize(".mc worlds launch \"local:New World\" --share")));
+            assertThrows(java.io.IOException.class, () -> commands.execute(commands.tokenize(".mc worlds launch \"local:New World\" --accept-eula")));
+            assertThrows(java.io.IOException.class, () -> commands.execute(commands.tokenize(".mc worlds share \"local:New World\"")));
+            assertThrows(java.io.IOException.class, () -> commands.execute(commands.tokenize(".mc worlds stop \"local:New World\"")));
+            assertEquals(2, launches.size());
+            commands.execute(commands.tokenize(".mc worlds list"));
+            assertTrue(output.stream().anyMatch(line -> line.contains("singleplayer | 1.21.1")));
         }
     }
 }

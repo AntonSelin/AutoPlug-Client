@@ -17,6 +17,8 @@ import java.util.function.Consumer;
 
 /** Five-view Swing dashboard. Network, launcher and disk operations never run on the EDT. */
 public final class DashboardPanel extends JPanel implements AutoCloseable {
+    // FlatLaf caches shared borders when the first controls are created.
+    { DashboardTheme.installDefaults(); }
     private final LauncherActions actions;
     private final ServerBrowserService browser;
     private final ExecutorService workers = Executors.newFixedThreadPool(4, runnable -> {
@@ -57,32 +59,39 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
     public DashboardPanel(LauncherActions actions, ServerBrowserService browser, boolean includeLegacyControls) {
         super(new BorderLayout(0, 0));
         this.actions = Objects.requireNonNull(actions); this.browser = Objects.requireNonNull(browser);
+        setBorder(new EmptyBorder(12, 12, 10, 12)); pages.setOpaque(false);
         setPreferredSize(new Dimension(1100, 720));
-        JPanel navigation = new JPanel(); navigation.setLayout(new BoxLayout(navigation, BoxLayout.Y_AXIS));
+        JPanel navigation = DashboardTheme.surface(null, 16); navigation.setLayout(new BoxLayout(navigation, BoxLayout.Y_AXIS));
         navigation.setBorder(new EmptyBorder(24, 16, 20, 16)); navigation.setPreferredSize(new Dimension(195, 600));
         JLabel brand = new JLabel("AutoPlug"); brand.setFont(brand.getFont().deriveFont(Font.BOLD, 25f));
         navigation.add(brand); navigation.add(Box.createVerticalStrut(5));
         JLabel subtitle = new JLabel("PLAY · MANAGE · SHARE"); subtitle.setFont(subtitle.getFont().deriveFont(10f));
         navigation.add(subtitle); navigation.add(Box.createVerticalStrut(30));
         ButtonGroup group = new ButtonGroup();
-        String[] names = {"Server Browser", "Virtual Worlds", "Profiles", "Server Manager", "Settings"};
+        String[] names = {"Server Browser", "Worlds", "Profiles", "Server Manager", "Settings"};
         JPanel[] views = {serverPage(), worldsPage(), profilesPage(), managerPage(includeLegacyControls), settingsPage()};
         for (int i = 0; i < names.length; i++) {
             String name = names[i]; pages.add(views[i], name);
             JToggleButton button = new JToggleButton(name); button.setHorizontalAlignment(SwingConstants.LEFT);
             button.setPreferredSize(new Dimension(170, 43));
             button.setMaximumSize(new Dimension(Integer.MAX_VALUE, 43)); button.setAlignmentX(Component.LEFT_ALIGNMENT);
-            button.addActionListener(e -> { cards.show(pages, name); if (name.equals("Virtual Worlds")) refreshWorlds(); });
+            button.addActionListener(e -> { cards.show(pages, name); if (name.equals("Worlds")) refreshWorlds(); });
             group.add(button); navigation.add(button); navigation.add(Box.createVerticalStrut(8));
             if (i == 0) button.setSelected(true);
         }
         navigation.add(Box.createVerticalGlue());
         JLabel footer = new JLabel("Your worlds. Your profiles."); footer.setFont(footer.getFont().deriveFont(11f)); navigation.add(footer);
         add(navigation, BorderLayout.WEST); add(pages, BorderLayout.CENTER);
-        status.setBorder(new EmptyBorder(8, 16, 8, 16)); add(status, BorderLayout.SOUTH);
+        JPanel statusBar = DashboardTheme.surface(new BorderLayout(), 8);
+        statusBar.add(status, BorderLayout.CENTER); add(statusBar, BorderLayout.SOUTH);
         refreshProfiles(); refreshWorlds(); refreshSettings();
         run("Importing Minecraft favorites", () -> { browser.importVanilla(); return browser.list(); }, this::showServers);
     }
+
+    @Override protected void paintComponent(Graphics graphics) {
+        super.paintComponent(graphics); DashboardTheme.landscape(graphics, getWidth(), getHeight());
+    }
+    @Override public void updateUI() { super.updateUI(); DashboardTheme.refreshColors(this); }
 
     private JPanel serverPage() {
         JPanel page = page("Server Browser", "Your Minecraft favorites, with live status and matching local profiles.");
@@ -216,8 +225,8 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
         content.add(toolbar(typeFilter, button("Create", this::createProfile), button("Clone / migrate", () -> cloneProfile(selectedProfile(), null)),
                 button("Check", () -> checkOrUpdate(false)), button("Update", () -> checkOrUpdate(true)), button("Refresh", this::refreshProfiles)), BorderLayout.NORTH);
         content.add(tableScroll(profileTable), BorderLayout.CENTER);
-        JPanel bottom = new JPanel(new BorderLayout(0, 8));
-        bottom.setBorder(new EmptyBorder(12, 0, 0, 0)); bottom.add(new JScrollPane(profileDetails), BorderLayout.CENTER);
+        JPanel bottom = DashboardTheme.transparent(new BorderLayout(0, 8));
+        bottom.setBorder(new EmptyBorder(12, 0, 0, 0)); bottom.add(DashboardTheme.scroll(profileDetails), BorderLayout.CENTER);
         bottom.add(toolbar(button("Launch client", () -> {
             ProfileInfo profile = selectedProfile(); if (!ready(profile)) return;
             if (!"MODS".equalsIgnoreCase(profile.type)) { information("Client profiles", "Choose a MODS profile to launch the Minecraft client."); return; }
@@ -318,13 +327,18 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
     }
 
     private JPanel worldsPage() {
-        JPanel page = page("Virtual Worlds", "Singleplayer worlds powered by their own local dedicated server.");
-        JPanel content = content(); content.add(toolbar(button("Create world", this::createWorld), button("Refresh", this::refreshWorlds)), BorderLayout.NORTH);
+        JPanel page = page("Worlds", "Your Minecraft saves and managed worlds, together in one place.");
+        JPanel content = DashboardTheme.transparent(new BorderLayout(0, 12));
+        JPanel controls = DashboardTheme.surface(new BorderLayout(), 8);
+        controls.add(toolbar(button("Create world", this::createWorld), button("Refresh", this::refreshWorlds)));
+        content.add(controls, BorderLayout.NORTH);
         worldCards.setLayout(new BoxLayout(worldCards, BoxLayout.Y_AXIS));
-        JScrollPane scroll = new JScrollPane(worldCards); scroll.setBorder(null); scroll.getVerticalScrollBar().setUnitIncrement(16);
+        worldCards.setOpaque(false);
+        JScrollPane scroll = DashboardTheme.scroll(worldCards);
         content.add(scroll, BorderLayout.CENTER);
-        JLabel note = new JLabel("Local play stays on your PC. Sharing is optional and always requires confirmation.");
-        note.setBorder(new EmptyBorder(12, 0, 0, 0)); content.add(note, BorderLayout.SOUTH); page.add(content, BorderLayout.CENTER); return page;
+        JPanel note = DashboardTheme.surface(new BorderLayout(), 12);
+        note.add(new JLabel("Singleplayer opens your original save. Managed worlds support optional sharing."));
+        content.add(note, BorderLayout.SOUTH); page.add(content, BorderLayout.CENTER); return page;
     }
     private void createWorld() {
         List<ProfileInfo> serverProfiles = new ArrayList<>();
@@ -334,7 +348,7 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
         JTextField name = new JTextField(); JComboBox<ProfileInfo> server = new JComboBox<>(serverProfiles.toArray(new ProfileInfo[0]));
         JComboBox<ProfileInfo> client = new JComboBox<>(clientProfiles.toArray(new ProfileInfo[0]));
         JCheckBox eula = new JCheckBox("I accept the Minecraft EULA");
-        if (!form("Create virtual world", fields("World name", name, "Server profile", server, "Client profile", client, "Minecraft EULA", toolbar(eula, button("Read EULA", this::openEula))))) return;
+        if (!form("Create managed world", fields("World name", name, "Server profile", server, "Client profile", client, "Minecraft EULA", toolbar(eula, button("Read EULA", this::openEula))))) return;
         if (!required(name)) return;
         ProfileInfo serverProfile = (ProfileInfo) server.getSelectedItem(), clientProfile = (ProfileInfo) client.getSelectedItem();
         if (serverProfile == null || clientProfile == null) return;
@@ -349,26 +363,39 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
     private void showWorlds() {
         worldCards.removeAll();
         if (worlds.isEmpty()) {
-            JPanel empty = new JPanel(new BorderLayout()); empty.setBorder(new EmptyBorder(60, 24, 60, 24));
+            JPanel empty = DashboardTheme.surface(new BorderLayout(0, 12), 24); empty.setBorder(new EmptyBorder(60, 24, 60, 24));
             JLabel title = new JLabel("A world of your own", SwingConstants.CENTER); title.setFont(title.getFont().deriveFont(Font.BOLD, 22f));
-            empty.add(title, BorderLayout.NORTH); empty.add(new JLabel("Create a world from a server pack and a matching client profile.", SwingConstants.CENTER), BorderLayout.CENTER);
+            empty.add(title, BorderLayout.NORTH); empty.add(new JLabel("Minecraft saves appear here automatically, or create a managed world.", SwingConstants.CENTER), BorderLayout.CENTER);
             worldCards.add(empty);
         }
         for (WorldInfo world : worlds) {
-            JPanel card = new JPanel(new BorderLayout(18, 8)); card.setBorder(BorderFactory.createCompoundBorder(BorderFactory.createLineBorder(UIManager.getColor("Separator.foreground")), new EmptyBorder(16, 16, 16, 16)));
-            card.setMaximumSize(new Dimension(Integer.MAX_VALUE, 160));
-            JLabel image = new JLabel("WORLD", SwingConstants.CENTER); image.setOpaque(true); image.setBackground(new Color(0x284C40)); image.setForeground(Color.WHITE); image.setPreferredSize(new Dimension(105, 95));
+            JPanel card = DashboardTheme.surface(new BorderLayout(18, 8), 16);
+            card.setName("world-" + world.id); card.setAlignmentX(Component.LEFT_ALIGNMENT);
+            card.setMaximumSize(new Dimension(Integer.MAX_VALUE, 180));
+            JLabel image = DashboardTheme.worldThumbnail(); image.setToolTipText(world.name);
             if (world.thumbnail != null && !world.thumbnail.isEmpty()) run("Loading world thumbnail", () -> {
                 File file = new File(world.thumbnail); if (!file.isFile() || file.length() > 8 * 1024 * 1024) return null;
                 java.awt.image.BufferedImage bitmap = javax.imageio.ImageIO.read(file);
-                if (bitmap == null) return null; return new ImageIcon(bitmap.getScaledInstance(105, 95, Image.SCALE_SMOOTH));
+                if (bitmap == null) return null;
+                double scale = 96.0 / Math.max(bitmap.getWidth(), bitmap.getHeight());
+                return new ImageIcon(bitmap.getScaledInstance(Math.max(1, (int) (bitmap.getWidth() * scale)), Math.max(1, (int) (bitmap.getHeight() * scale)), Image.SCALE_SMOOTH));
             }, icon -> { if (icon != null) { image.setText(""); image.setIcon(icon); } });
-            card.add(image, BorderLayout.WEST);
-            JPanel details = new JPanel(new BorderLayout(0, 6)); JLabel name = new JLabel(world.name + (world.running ? "  •  Running" : "")); name.setFont(name.getFont().deriveFont(Font.BOLD, 18f));
-            details.add(name, BorderLayout.NORTH); JTextArea description = textArea(2);
-            description.setText("Server: " + profileName(world.serverProfileId) + "   ·   Client: " + profileName(world.clientProfileId) + "\n" + world.directory);
+            JPanel thumbnail = DashboardTheme.transparent(new GridBagLayout()); thumbnail.add(image);
+            card.add(thumbnail, BorderLayout.WEST);
+            JPanel details = DashboardTheme.transparent(new BorderLayout(0, 6));
+            JPanel heading = DashboardTheme.transparent(new BorderLayout(0, 4));
+            JLabel kind = new JLabel(world.local ? "Singleplayer" : "Managed world" + (world.running ? "  ·  Running" : ""));
+            DashboardTheme.tint(kind, true); kind.setFont(kind.getFont().deriveFont(Font.BOLD, 11f));
+            JLabel name = new JLabel(world.name); name.setFont(name.getFont().deriveFont(Font.BOLD, 18f));
+            name.putClientProperty("html.disable", Boolean.TRUE);
+            heading.add(kind, BorderLayout.NORTH); heading.add(name, BorderLayout.CENTER);
+            details.add(heading, BorderLayout.NORTH); JTextArea description = textArea(2);
+            DashboardTheme.tint(description, false);
+            description.setText((world.local ? "Minecraft " + (knownWorldVersion(world) ? world.gameVersion : "version unknown — choose before launch")
+                    : "Server: " + profileName(world.serverProfileId) + "   ·   Client: " + profileName(world.clientProfileId)) + "\n" + world.directory);
             details.add(description, BorderLayout.CENTER);
-            details.add(toolbar(button("Play locally", () -> run("Starting world " + world.name, () -> { actions.launchWorld(world.id, false); return null; }, ignored -> refreshWorlds())),
+            if (world.local) details.add(toolbar(button("Launch", () -> launchLocalWorld(world)), button("Open folder", () -> openFolder(world.directory))), BorderLayout.SOUTH);
+            else details.add(toolbar(button("Play locally", () -> run("Starting world " + world.name, () -> { actions.launchWorld(world.id, false); return null; }, ignored -> refreshWorlds())),
                     button("Share", () -> {
                         if (!confirm("Share this world", "Share “" + world.name + "” beyond this PC?\nThis may open a router port using UPnP and expose the server to the internet.\nOnly share the join address with people you trust.")) return;
                         run("Preparing world sharing", () -> {
@@ -383,6 +410,23 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
             card.add(details, BorderLayout.CENTER); worldCards.add(card); worldCards.add(Box.createVerticalStrut(12));
         }
         worldCards.add(Box.createVerticalGlue()); worldCards.revalidate(); worldCards.repaint();
+    }
+
+    private static boolean knownWorldVersion(WorldInfo world) { return world.gameVersion != null && !world.gameVersion.trim().isEmpty(); }
+    private void launchLocalWorld(WorldInfo world) {
+        String version = world.gameVersion;
+        if (!knownWorldVersion(world)) {
+            JTextField choice = new JTextField();
+            JTextArea explanation = textArea(3);
+            explanation.setText("This save has no recorded Minecraft version. Enter the version you last used for it. Choose carefully: opening a save in another version can upgrade or damage it. Back up the save first.");
+            JPanel prompt = new JPanel(new BorderLayout(0, 12)); prompt.add(explanation, BorderLayout.NORTH);
+            prompt.add(fields("Minecraft version", choice), BorderLayout.CENTER);
+            if (!form("Choose this save's existing version", prompt) || !required(choice)) return;
+            version = choice.getText().trim();
+        }
+        final String selectedVersion = version;
+        run("Launching " + world.name + " with Minecraft " + selectedVersion,
+                () -> actions.launchLocalWorld(world.id, selectedVersion), result -> { status.setText(result); status.setToolTipText(result); });
     }
     private String profileName(String id) { for (ProfileInfo profile : profiles) if (profile.id.equals(id)) return profile.name; return id; }
     private void showShare(String text) {
@@ -418,7 +462,7 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
 
     private JPanel settingsPage() {
         JPanel page = page("Settings", "Runtime choices, default profiles, local networking and Minecraft accounts.");
-        JPanel content = new JPanel(); content.setLayout(new BoxLayout(content, BoxLayout.Y_AXIS));
+        JPanel content = DashboardTheme.surface(null, 18); content.setLayout(new BoxLayout(content, BoxLayout.Y_AXIS));
         JLabel runtime = section("Java runtimes"); content.add(runtime);
         content.add(fields("Java 8 executable", java8, "Java 17 executable", java17, "Java 21 executable", java21,
                 "Other runtimes (major=path; …)", extraJava));
@@ -443,7 +487,7 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
         })));
         JTextArea note = textArea(3); note.setText("Offline mode is for local/offline-enabled play. Online servers usually require a licensed Microsoft account.\nUPnP is used only after you explicitly choose Share; unsupported routers need manual forwarding or a tunnel.");
         note.setBorder(new EmptyBorder(12, 0, 0, 0)); content.add(note); content.add(Box.createVerticalGlue());
-        JScrollPane scroll = new JScrollPane(content); scroll.setBorder(null); scroll.getVerticalScrollBar().setUnitIncrement(16); page.add(scroll, BorderLayout.CENTER); return page;
+        page.add(DashboardTheme.scroll(content), BorderLayout.CENTER); return page;
     }
     private void refreshSettings() { run("Loading settings", actions::settings, this::showSettings); }
     private void showSettings(SettingsInfo settings) {
@@ -499,14 +543,14 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
     private static JComboBox<String> loaders(String selected) { JComboBox<String> result = new JComboBox<>(new String[]{"VANILLA", "FABRIC", "QUILT", "FORGE", "NEOFORGE", "PAPER", "SPIGOT", "PURPUR"}); result.setSelectedItem(selected); return result; }
     private static JLabel section(String title) { JLabel label = new JLabel(title); label.setFont(label.getFont().deriveFont(Font.BOLD, 16f)); label.setBorder(new EmptyBorder(0, 0, 10, 0)); label.setAlignmentX(Component.LEFT_ALIGNMENT); return label; }
     private static JPanel page(String title, String description) {
-        JPanel page = new JPanel(new BorderLayout(0, 22)); page.setBorder(new EmptyBorder(26, 22, 16, 22));
-        JPanel heading = new JPanel(new BorderLayout(0, 7)); JLabel label = new JLabel(title); label.setFont(label.getFont().deriveFont(Font.BOLD, 27f));
-        heading.add(label, BorderLayout.NORTH); JLabel subtitle = new JLabel(description); subtitle.setFont(subtitle.getFont().deriveFont(12f)); heading.add(subtitle, BorderLayout.SOUTH); page.add(heading, BorderLayout.NORTH); return page;
+        JPanel page = DashboardTheme.transparent(new BorderLayout(0, 16)); page.setBorder(new EmptyBorder(0, 18, 12, 0));
+        JPanel heading = DashboardTheme.surface(new BorderLayout(0, 7), 18); JLabel label = new JLabel(title); label.setFont(label.getFont().deriveFont(Font.BOLD, 27f));
+        heading.add(label, BorderLayout.NORTH); JLabel subtitle = new JLabel(description); DashboardTheme.tint(subtitle, false); subtitle.setFont(subtitle.getFont().deriveFont(12f)); heading.add(subtitle, BorderLayout.SOUTH); page.add(heading, BorderLayout.NORTH); return page;
     }
-    private static JPanel content() { return new JPanel(new BorderLayout(0, 12)); }
-    private static JPanel toolbar(JComponent... components) { JPanel panel = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 3)); for (JComponent component : components) panel.add(component); panel.setAlignmentX(Component.LEFT_ALIGNMENT); return panel; }
-    private static JButton button(String text, Runnable action) { JButton button = new JButton(text); button.addActionListener(e -> action.run()); return button; }
-    private static JTextArea textArea(int rows) { JTextArea area = new JTextArea(rows, 30); area.setEditable(false); area.setLineWrap(true); area.setWrapStyleWord(true); area.setFont(UIManager.getFont("Label.font")); return area; }
+    private static JPanel content() { return DashboardTheme.surface(new BorderLayout(0, 12), 16); }
+    private static JPanel toolbar(JComponent... components) { JPanel panel = DashboardTheme.transparent(new FlowLayout(FlowLayout.LEFT, 6, 3)); for (JComponent component : components) panel.add(component); panel.setAlignmentX(Component.LEFT_ALIGNMENT); return panel; }
+    private static JButton button(String text, Runnable action) { JButton button = new JButton(text); button.setMargin(new Insets(6, 14, 6, 14)); button.addActionListener(e -> action.run()); return button; }
+    private static JTextArea textArea(int rows) { JTextArea area = new JTextArea(rows, 30); area.setEditable(false); area.setOpaque(false); area.setLineWrap(true); area.setWrapStyleWord(true); area.setFont(UIManager.getFont("Label.font")); return area; }
     private static DefaultTableModel model(String... columns) { return new DefaultTableModel(columns, 0) { @Override public boolean isCellEditable(int row, int column) { return false; } }; }
     private static JTable table(DefaultTableModel model) {
         JTable table = new JTable(model); table.setRowHeight(35); table.setFillsViewportHeight(true);
@@ -515,9 +559,9 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
         text.putClientProperty("html.disable", Boolean.TRUE); table.setDefaultRenderer(Object.class, text);
         return table;
     }
-    private static JScrollPane tableScroll(JTable table) { JScrollPane scroll = new JScrollPane(table); scroll.setColumnHeaderView(table.getTableHeader()); return scroll; }
+    private static JScrollPane tableScroll(JTable table) { JScrollPane scroll = DashboardTheme.scroll(table); scroll.setColumnHeaderView(table.getTableHeader()); return scroll; }
     private static JPanel fields(Object... fields) {
-        JPanel panel = new JPanel(new GridBagLayout()); panel.setAlignmentX(Component.LEFT_ALIGNMENT);
+        JPanel panel = DashboardTheme.transparent(new GridBagLayout()); panel.setAlignmentX(Component.LEFT_ALIGNMENT);
         for (int i = 0; i < fields.length; i += 2) {
             GridBagConstraints label = new GridBagConstraints(); label.gridx = 0; label.gridy = i / 2; label.anchor = GridBagConstraints.WEST; label.insets = new Insets(5, 0, 5, 14);
             panel.add(new JLabel(String.valueOf(fields[i])), label);

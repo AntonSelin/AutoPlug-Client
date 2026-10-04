@@ -84,6 +84,37 @@ class MinecraftLauncherTest {
         assertTrue(MinecraftLauncher.allowed(feature, Collections.singletonMap("is_demo_user", true)));
     }
 
+    @Test void localQuickPlayUsesSaveFolderAndRetainsOriginalGameDirectory() throws Exception {
+        Path original = temporary.resolve(".minecraft");
+        LaunchRequest request = new LaunchRequest(original, "1.21.1", "VANILLA", null,
+                MinecraftAccount.offline("Player"), null, 0, "My world folder");
+        List<String> args = args(fixture("1.21.1"), request);
+        assertEquals("My world folder", args.get(args.indexOf("--quickPlaySingleplayer") + 1));
+        assertEquals(original.toString(), args.get(args.indexOf("--gameDir") + 1));
+        assertEquals(original.resolve("logs/quick-play.json").toString(), args.get(args.indexOf("--quickPlayPath") + 1));
+        assertFalse(args.contains("--quickPlayMultiplayer"));
+        assertFalse(args.contains("--quickPlayRealms"));
+        assertFalse(args.contains("--server"));
+    }
+
+    @Test void legacyLocalWorldKeepsExactVersionWithoutInventingDirectLaunchFlags() throws Exception {
+        LaunchRequest request = new LaunchRequest(temporary, "1.16.5", "VANILLA", null,
+                MinecraftAccount.offline("Player"), null, 0, "Legacy world");
+        List<String> args = args(fixture("1.16.5"), request);
+        assertEquals("1.16.5", args.get(args.indexOf("--version") + 1));
+        assertFalse(args.contains("--quickPlaySingleplayer"));
+        assertFalse(args.contains("--server"));
+        assertFalse(args.stream().anyMatch(value -> value.contains("${")));
+    }
+
+    @Test void localWorldRequestsRejectTraversalAndAmbiguousTargets() {
+        for (String invalid : Arrays.asList("", ".", "..", "../world", "nested/world", "nested\\world", "C:world", "world\n"))
+            assertThrows(IllegalArgumentException.class, () -> new LaunchRequest(temporary, "1.21.1", "VANILLA", null,
+                    MinecraftAccount.offline("Player"), null, 0, invalid));
+        assertThrows(IllegalArgumentException.class, () -> new LaunchRequest(temporary, "1.21.1", "VANILLA", null,
+                MinecraftAccount.offline("Player"), "localhost", 25565, "World"));
+    }
+
     @Test void mavenCoordinatesAndCachePathsRejectTraversal() throws Exception {
         assertEquals("net/fabricmc/intermediary/1.21.1/intermediary-1.21.1.jar", MinecraftLauncher.mavenPath("net.fabricmc:intermediary:1.21.1"));
         assertEquals("g/a/1/a-1-natives.jar", MinecraftLauncher.mavenPath("g:a:1:natives"));

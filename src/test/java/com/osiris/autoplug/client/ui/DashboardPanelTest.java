@@ -1,6 +1,7 @@
 package com.osiris.autoplug.client.ui;
 
 import com.formdev.flatlaf.FlatLightLaf;
+import com.formdev.flatlaf.FlatDarkLaf;
 import com.osiris.autoplug.client.browser.ServerBrowserService;
 import com.osiris.autoplug.client.ui.LauncherActions.*;
 import org.junit.jupiter.api.Test;
@@ -53,11 +54,70 @@ class DashboardPanelTest {
         try {
             assertTrue(calls.await(4, TimeUnit.SECONDS)); assertFalse(onEventThread.get());
             SwingUtilities.invokeAndWait(() -> {
-                for (String view : new String[]{"Server Browser", "Virtual Worlds", "Profiles", "Server Manager", "Settings"})
+                for (String view : new String[]{"Server Browser", "Worlds", "Profiles", "Server Manager", "Settings"})
                     assertNotNull(findButton(panel.get(), view), "Missing navigation: " + view);
                 assertNotNull(findButton(panel.get(), "Create world"));
                 assertNotNull(findButton(panel.get(), "Sign in with Microsoft"));
             });
+        } finally { SwingUtilities.invokeAndWait(() -> panel.get().close()); }
+    }
+
+    @Test void localWorldLaunchUsesRecordedVersionWithoutProfileEulaOrSharing() throws Exception {
+        CountDownLatch launched = new CountDownLatch(1);
+        AtomicReference<List<String>> request = new AtomicReference<>(); AtomicBoolean onEventThread = new AtomicBoolean();
+        String result = "Minecraft 1.12.2 started. Select Singleplayer, then Old cottage.";
+        LauncherActions actions = new LauncherActions() {
+            @Override public List<WorldInfo> worlds() {
+                return Arrays.asList(new WorldInfo("local:cottage", "Old cottage", "", "", directory.toString(), "", false, true, "1.12.2"));
+            }
+            @Override public List<ProfileInfo> profiles() {
+                return Arrays.asList(new ProfileInfo("newer-profile", "Different version", "1.21.1", "FABRIC", "MODS", "", false));
+            }
+            @Override public String launchLocalWorld(String id, String version) {
+                onEventThread.set(SwingUtilities.isEventDispatchThread()); request.set(Arrays.asList(id, version)); launched.countDown(); return result;
+            }
+            @Override public void launchWorld(String id, boolean share) { fail("A local save must not start a managed server"); }
+        };
+        AtomicReference<DashboardPanel> panel = new AtomicReference<>();
+        SwingUtilities.invokeAndWait(() -> panel.set(new DashboardPanel(actions, new ServerBrowserService(directory.resolve("servers.json"), directory.resolve("servers.dat")), false)));
+        try {
+            awaitUi(() -> findNamed(panel.get(), "world-local:cottage") != null);
+            SwingUtilities.invokeAndWait(() -> {
+                Container card = findNamed(panel.get(), "world-local:cottage");
+                assertTrue(containsText(card, "Singleplayer")); assertTrue(containsText(card, "Minecraft 1.12.2"));
+                assertNull(findButton(card, "Share")); assertNull(findButton(card, "Minecraft EULA")); assertNull(findButton(card, "Play locally"));
+                findButton(card, "Launch").doClick();
+            });
+            assertTrue(launched.await(4, TimeUnit.SECONDS)); assertFalse(onEventThread.get());
+            assertEquals(Arrays.asList("local:cottage", "1.12.2"), request.get());
+            awaitUi(() -> containsText(panel.get(), result));
+        } finally { SwingUtilities.invokeAndWait(() -> panel.get().close()); }
+    }
+
+    @Test void unknownLocalVersionIsVisibleAndManagedWorldKeepsItsOwnControls() throws Exception {
+        CountDownLatch managedLaunch = new CountDownLatch(1);
+        LauncherActions actions = new LauncherActions() {
+            @Override public List<WorldInfo> worlds() {
+                return Arrays.asList(new WorldInfo("local:old", "Old save", "", "", directory.toString(), "", false, true, ""),
+                        new WorldInfo("managed", "Friends", "server", "client", directory.toString(), "", false));
+            }
+            @Override public void launchWorld(String id, boolean share) { assertEquals("managed", id); assertFalse(share); managedLaunch.countDown(); }
+            @Override public String launchLocalWorld(String id, String version) { fail("Managed play must not launch a local save"); return ""; }
+        };
+        AtomicReference<DashboardPanel> panel = new AtomicReference<>();
+        SwingUtilities.invokeAndWait(() -> panel.set(new DashboardPanel(actions, new ServerBrowserService(directory.resolve("servers.json"), directory.resolve("servers.dat")), false)));
+        try {
+            awaitUi(() -> findNamed(panel.get(), "world-managed") != null);
+            SwingUtilities.invokeAndWait(() -> {
+                Container local = findNamed(panel.get(), "world-local:old");
+                assertTrue(containsText(local, "version unknown")); assertNotNull(findButton(local, "Launch"));
+                assertFalse(containsText(local, "Server:")); assertNull(findButton(local, "Share"));
+                Container managed = findNamed(panel.get(), "world-managed");
+                assertTrue(containsText(managed, "Managed world")); assertNotNull(findButton(managed, "Share"));
+                assertNotNull(findButton(managed, "Minecraft EULA")); assertNull(findButton(managed, "Launch"));
+                findButton(managed, "Play locally").doClick();
+            });
+            assertTrue(managedLaunch.await(4, TimeUnit.SECONDS));
         } finally { SwingUtilities.invokeAndWait(() -> panel.get().close()); }
     }
 
@@ -110,7 +170,7 @@ class DashboardPanelTest {
         Path data = Files.createTempDirectory("autoplug-dashboard-preview-");
         AtomicReference<DashboardPanel> panel = new AtomicReference<>(); CountDownLatch calls = new CountDownLatch(3);
         SwingUtilities.invokeAndWait(() -> {
-            FlatLightLaf.setup();
+            if (args.length > 3 && "light".equalsIgnoreCase(args[3])) FlatLightLaf.setup(); else FlatDarkLaf.setup();
             com.osiris.autoplug.client.utils.GD.TARGET = com.osiris.autoplug.client.Target.MINECRAFT_SERVER;
             panel.set(new DashboardPanel(fixtures(new AtomicBoolean(), calls), new ServerBrowserService(data.resolve("servers.json"), data.resolve("servers.dat")), true));
         });
@@ -118,7 +178,7 @@ class DashboardPanelTest {
         // Waiting behind the worker callbacks allows the fixture models to arrive before printing.
         Thread.sleep(250);
         try {
-            for (String view : new String[]{"Server Browser", "Virtual Worlds", "Profiles", "Server Manager", "Settings"}) {
+            for (String view : new String[]{"Server Browser", "Worlds", "Profiles", "Server Manager", "Settings"}) {
                 SwingUtilities.invokeAndWait(() -> findButton(panel.get(), view).doClick());
                 Thread.sleep(50);
                 SwingUtilities.invokeAndWait(() -> {
@@ -147,8 +207,9 @@ class DashboardPanelTest {
                         new ProfileInfo("template", "My base template", "1.21.1", "FABRIC", "MODS", "/profiles/base", true));
             }
             @Override public List<WorldInfo> worlds() {
-                called(); return Arrays.asList(new WorldInfo("cove", "Quiet Cove", "paper", "vanilla", "/worlds/quiet-cove", "", false),
-                        new WorldInfo("forest", "The long weekend", "paper", "fabric", "/worlds/long-weekend", "", false));
+                called(); return Arrays.asList(new WorldInfo("local:cottage", "Lakeside cottage", "", "", "/.minecraft/saves/Lakeside cottage", "", false, true, "1.21.1"),
+                        new WorldInfo("cove", "Quiet Cove", "paper", "vanilla", "/worlds/quiet-cove", "", false),
+                        new WorldInfo("local:archive", "An old adventure", "", "", "/.minecraft/saves/An old adventure", "", false, true, ""));
             }
             @Override public SettingsInfo settings() { called(); SettingsInfo settings = new SettingsInfo(); settings.account = "Offline · Alex"; settings.defaultProfile = "vanilla"; settings.java17 = "/runtimes/java-17/bin/java"; settings.java21 = "/runtimes/java-21/bin/java"; return settings; }
         };
@@ -159,6 +220,27 @@ class DashboardPanelTest {
             if (component instanceof Container) { AbstractButton found = findButton((Container) component, text); if (found != null) return found; }
         }
         return null;
+    }
+    private static Container findNamed(Container container, String name) {
+        if (name.equals(container.getName())) return container;
+        for (Component child : container.getComponents()) if (child instanceof Container) {
+            Container found = findNamed((Container) child, name); if (found != null) return found;
+        }
+        return null;
+    }
+    private static boolean containsText(Container container, String text) {
+        if (container instanceof JLabel && ((JLabel) container).getText() != null && ((JLabel) container).getText().contains(text)) return true;
+        if (container instanceof JTextArea && ((JTextArea) container).getText().contains(text)) return true;
+        for (Component child : container.getComponents()) if (child instanceof Container && containsText((Container) child, text)) return true;
+        return false;
+    }
+    private static void awaitUi(java.util.function.BooleanSupplier condition) throws Exception {
+        AtomicBoolean satisfied = new AtomicBoolean(); long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(4);
+        while (!satisfied.get() && System.nanoTime() < deadline) {
+            SwingUtilities.invokeAndWait(() -> satisfied.set(condition.getAsBoolean()));
+            if (!satisfied.get()) Thread.sleep(20);
+        }
+        assertTrue(satisfied.get(), "Dashboard update did not arrive");
     }
     private static void layout(Container container) { container.doLayout(); for (Component component : container.getComponents()) if (component instanceof Container) layout((Container) component); }
 }

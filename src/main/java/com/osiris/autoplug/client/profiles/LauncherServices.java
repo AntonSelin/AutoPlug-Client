@@ -22,6 +22,7 @@ public class LauncherServices implements LauncherActions, AutoCloseable {
     private final ProfileStore profiles;
     private final ProfileUpdates updates;
     private final WorldStore worlds;
+    private final LocalWorldStore localWorlds;
     private final WorldService worldService;
     private final ServerBrowserService servers;
     private final JavaRuntimeManager runtimes;
@@ -29,6 +30,7 @@ public class LauncherServices implements LauncherActions, AutoCloseable {
     private final AccountStore accounts;
     private final MicrosoftAccountService microsoft = new MicrosoftAccountService();
     private final Map<String, Process> clients = new ConcurrentHashMap<>();
+    private final Map<String, Process> localClients = new ConcurrentHashMap<>();
     private final Map<String, ProfileUpdates.Plan> plans = new ConcurrentHashMap<>();
     private final JsonFiles json = new JsonFiles();
     private State state;
@@ -38,10 +40,15 @@ public class LauncherServices implements LauncherActions, AutoCloseable {
     private final ThreadLocal<MinecraftAccount> worldAccount = new ThreadLocal<>();
 
     public LauncherServices(Path root, Consumer<String> progress) throws Exception {
+        this(root, LocalWorldStore.defaultMinecraftDirectory(), progress);
+    }
+    /** An explicit Minecraft directory keeps local-save discovery testable without touching user saves. */
+    public LauncherServices(Path root, Path minecraftDirectory, Consumer<String> progress) throws Exception {
         this.root = root.toAbsolutePath().normalize(); this.progress = progress == null ? ignored -> { } : progress;
         Files.createDirectories(this.root);
         profiles = new ProfileStore(this.root.resolve("profiles")); updates = new ProfileUpdates(profiles);
         worlds = new WorldStore(this.root.resolve("worlds"));
+        localWorlds = new LocalWorldStore(minecraftDirectory, this.progress);
         runtimes = new JavaRuntimeManager(this.root.resolve("cache/runtimes"));
         launcher = new MinecraftLauncher(this.root.resolve("cache"), runtimes);
         accounts = new AccountStore(this.root.resolve("accounts.json"));
@@ -52,7 +59,7 @@ public class LauncherServices implements LauncherActions, AutoCloseable {
         if (state.settings.rememberAccount) for (MinecraftAccount saved : accounts.list()) if (saved.uuid.equals(state.selectedAccount)) account = saved;
         if (!state.settings.rememberAccount) forgetStoredAccounts();
         applyRuntimeSettings(state.settings);
-        servers = new ServerBrowserService(this.root.resolve("servers.json"), ServerBrowserService.defaults().vanillaFile());
+        servers = new ServerBrowserService(this.root.resolve("servers.json"), minecraftDirectory.resolve("servers.dat"));
         MinecraftServerInstaller installer = new MinecraftServerInstaller(profiles.getCache(),
                 version -> runtimes.resolve(launcher.requiredJavaMajor(version, this.progress), this.progress), this.progress,
                 (profile, directory) -> {
@@ -114,7 +121,45 @@ public class LauncherServices implements LauncherActions, AutoCloseable {
         addArtifact(id, Paths.get(source), modrinthId == null || modrinthId.trim().isEmpty() ? null : modrinthId.trim());
     }
     @Override public List<WorldInfo> worlds() throws Exception {
-        List<WorldInfo> result = new ArrayList<>(); for (VirtualWorld w : worlds.list()) result.add(info(w)); return result;
+        List<WorldInfo> result = new ArrayList<>();
+        try {
+            for (LocalWorld world : localWorlds.list()) result.add(new WorldInfo(world.id, world.name, "", "", world.directory.toString(),
+                    world.icon == null ? null : world.icon.toString(), localClients.containsKey(world.id), true, world.gameVersion));
+        } catch (IOException | SecurityException e) {
+            progress.accept("Could not list local Minecraft saves: " + e.getMessage());
+        }
+        for (VirtualWorld w : worlds.list()) result.add(info(w));
+        return result;
+    }
+    @Override public String launchLocalWorld(String id, String version) throws Exception {
+        LocalWorld world = localWorlds.get(id);
+        String selected = localWorlds.launchVersion(world, version);
+        // All standard saves share one game directory and its settings/native files.
+        // Retain one lease for that directory until the child exits, including preparation failures.
+        ProfileLease lease = new ProfileLease(world.gameDirectory);
+        try {
+            MinecraftAccount current = currentAccount();
+            PreparedLaunch prepared = launcher.prepare(new LaunchRequest(world.gameDirectory, selected, "VANILLA", null,
+                    current, null, 0, world.saveName()), progress);
+            LocalWorld fresh = localWorlds.get(id);
+            if (!fresh.gameVersion.equals(world.gameVersion) || fresh.modded != world.modded)
+                throw new IOException("The save's version metadata changed while preparing Minecraft. Refresh and select it again.");
+            localWorlds.launchVersion(fresh, selected);
+            Process process = launcher.launch(prepared); trackLocalClient(id, process, lease);
+            if (prepared.arguments.contains("--quickPlaySingleplayer"))
+                return "Started Minecraft " + selected + " with Quick Play for '" + world.name + "'.";
+            return "Started Minecraft " + selected + ". This version does not support direct world launch; choose '" + world.name
+                    + "' (folder " + world.saveName() + ") from Singleplayer.";
+        } catch (Exception e) { lease.close(); throw e; }
+    }
+    /** Existing saves must be closed from Minecraft so its integrated server can save normally. */
+    void trackLocalClient(String id, Process process, ProfileLease lease) {
+        localClients.put(id, process);
+        process.onExit().thenRun(() -> {
+            localClients.remove(id, process);
+            try { lease.close(); }
+            catch (IOException e) { progress.accept("Could not release local Minecraft lock: " + e.getMessage()); }
+        });
     }
     @Override public WorldInfo createWorld(String name, String serverProfileId, String clientProfileId) throws Exception {
         Profile server = profiles.get(serverProfileId), client = profiles.get(clientProfileId);
@@ -214,10 +259,12 @@ public class LauncherServices implements LauncherActions, AutoCloseable {
         return new WorldInfo(w.id, w.name, w.serverProfileId, w.clientProfileId, worlds.getDirectory(w.id).toString(), w.thumbnail, running);
     }
     public void waitForSessions() throws InterruptedException {
-        while (!clients.isEmpty() || !worldService.activeSessions().isEmpty()) Thread.sleep(250);
+        while (!clients.isEmpty() || !localClients.isEmpty() || !worldService.activeSessions().isEmpty()) Thread.sleep(250);
     }
     @Override public void close() {
         worldService.close();
         for (Process process : clients.values()) if (process.isAlive()) process.destroy();
+        // Never destroy localClients: abrupt termination can corrupt an original user's save.
+        // Their exit callbacks retain/release the lease while this launcher JVM remains alive.
     }
 }

@@ -14,9 +14,15 @@ public final class LaunchRequest {
     public final MinecraftAccount account;
     public final String serverHost;
     public final int serverPort;
+    public final String singleplayerWorld;
 
     public LaunchRequest(Path gameDir, String version, String loader, String loaderVersion,
                          MinecraftAccount account, String serverHost, int serverPort) {
+        this(gameDir, version, loader, loaderVersion, account, serverHost, serverPort, null);
+    }
+
+    public LaunchRequest(Path gameDir, String version, String loader, String loaderVersion,
+                         MinecraftAccount account, String serverHost, int serverPort, String singleplayerWorld) {
         this.gameDir = Objects.requireNonNull(gameDir, "gameDir").toAbsolutePath().normalize();
         this.version = safeVersion(version);
         this.loader = loader == null ? "VANILLA" : loader.toUpperCase(Locale.ROOT);
@@ -30,6 +36,13 @@ public final class LaunchRequest {
         if (this.serverHost != null && (this.serverHost.contains("\n") || this.serverHost.contains("\r")))
             throw new IllegalArgumentException("Invalid server address.");
         this.serverPort = serverPort;
+        if (singleplayerWorld != null && (singleplayerWorld.isEmpty() || singleplayerWorld.equals(".") || singleplayerWorld.equals("..")
+                || singleplayerWorld.indexOf('/') >= 0 || singleplayerWorld.indexOf('\\') >= 0 || singleplayerWorld.indexOf(':') >= 0
+                || singleplayerWorld.chars().anyMatch(Character::isISOControl)))
+            throw new IllegalArgumentException("Singleplayer world must be a save directory name.");
+        if (singleplayerWorld != null && this.serverHost != null)
+            throw new IllegalArgumentException("Choose either a local world or a multiplayer server.");
+        this.singleplayerWorld = singleplayerWorld;
     }
 
     static String safeVersion(String value) {

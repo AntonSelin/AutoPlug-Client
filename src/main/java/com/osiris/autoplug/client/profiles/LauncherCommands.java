@@ -97,18 +97,41 @@ public class LauncherCommands {
     private void worlds(List<String> args) throws Exception {
         String action = at(args, 2, "Use .mc worlds list/create/launch/share/stop");
         switch (action) {
-            case "list": for (LauncherActions.WorldInfo w : services.worlds()) output.accept(w.id + " | " + w.name + " | " + (w.running ? "running" : "stopped")); break;
+            case "list": for (LauncherActions.WorldInfo w : services.worlds()) output.accept(w.id + " | " + w.name + " | "
+                    + (w.local ? "singleplayer | " + (w.gameVersion.isEmpty() ? "version unknown" : w.gameVersion) : "managed server")
+                    + " | " + (w.running ? "running" : "stopped")); break;
             case "create":
                 LauncherActions.WorldInfo w = services.createWorld(at(args, 3, "Name required"), at(args, 4, "Server profile id required"), at(args, 5, "Client profile id required"));
                 if (args.contains("--accept-eula")) services.setWorldEulaAccepted(w.id, true);
                 output.accept("Created world " + w.id + (args.contains("--accept-eula") ? "" : "; EULA acceptance required before launch (https://aka.ms/MinecraftEULA).")); break;
             case "launch":
-                String id = at(args, 3, "World id required"); if (args.contains("--accept-eula")) services.setWorldEulaAccepted(id, true);
-                services.launchWorld(id, args.contains("--share")); break;
-            case "share": output.accept(services.shareWorld(at(args, 3, "World id required"))); break;
-            case "stop": services.getWorldService().stopWorld(at(args, 3, "World id required")); break;
+                String id = at(args, 3, "World id required");
+                LauncherActions.WorldInfo selected = world(id);
+                if (selected.local) {
+                    if (args.contains("--share") || args.contains("--accept-eula"))
+                        throw new IOException("Singleplayer saves do not use AutoPlug server sharing or server EULA flags.");
+                    String version = option(args, "--version", selected.gameVersion);
+                    require(version, "This save has no recorded version. Use --version <original Minecraft version>; no upgrade is selected automatically.");
+                    output.accept(services.launchLocalWorld(id, version));
+                } else {
+                    if (args.contains("--version")) throw new IOException("Managed worlds use their attached profiles; --version is for singleplayer saves.");
+                    if (args.contains("--accept-eula")) services.setWorldEulaAccepted(id, true);
+                    services.launchWorld(id, args.contains("--share"));
+                }
+                break;
+            case "share": output.accept(services.shareWorld(managedWorld(at(args, 3, "World id required")).id)); break;
+            case "stop": services.getWorldService().stopWorld(managedWorld(at(args, 3, "World id required")).id); break;
             default: throw new IOException("Unknown world action");
         }
+    }
+    private LauncherActions.WorldInfo world(String id) throws Exception {
+        for (LauncherActions.WorldInfo world : services.worlds()) if (world.id.equals(id)) return world;
+        throw new IOException("World not found: " + id);
+    }
+    private LauncherActions.WorldInfo managedWorld(String id) throws Exception {
+        LauncherActions.WorldInfo world = world(id);
+        if (world.local) throw new IOException("This is a singleplayer save. Use Minecraft's menu to leave it or open it to LAN.");
+        return world;
     }
     public String help() {
         return ".profiles list/create/clone/delete/template/add; .check|.update mods|plugins --profile <id>; "
