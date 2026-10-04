@@ -170,7 +170,7 @@ class DashboardPanelTest {
         Path data = Files.createTempDirectory("autoplug-dashboard-preview-");
         AtomicReference<DashboardPanel> panel = new AtomicReference<>(); CountDownLatch calls = new CountDownLatch(3);
         SwingUtilities.invokeAndWait(() -> {
-            if (args.length > 3 && "light".equalsIgnoreCase(args[3])) FlatLightLaf.setup(); else FlatDarkLaf.setup();
+            if (args.length > 3 && "dark".equalsIgnoreCase(args[3])) FlatDarkLaf.setup(); else FlatLightLaf.setup();
             com.osiris.autoplug.client.utils.GD.TARGET = com.osiris.autoplug.client.Target.MINECRAFT_SERVER;
             panel.set(new DashboardPanel(fixtures(new AtomicBoolean(), calls), new ServerBrowserService(data.resolve("servers.json"), data.resolve("servers.dat")), true));
         });

@@ -1,6 +1,6 @@
 # Native Minecraft launcher, profiles and worlds
 
-AutoPlug's desktop dashboard includes **Server Browser**, **Worlds**, **Profiles**, **Server Manager** and **Settings**. The launcher downloads Minecraft metadata, libraries, assets and loader components directly; it does not embed another launcher. The existing server wrapper and updater commands remain available. Rounded translucent panels sit over an original block-landscape panorama, with colors adapted to the selected light or dark theme.
+AutoPlug's desktop dashboard includes **Server Browser**, **Worlds**, **Profiles**, **Server Manager** and **Settings**. The launcher downloads Minecraft metadata, libraries, assets and loader components directly; it does not embed another launcher. The existing server wrapper and updater commands remain available. Light is the default theme: rounded frosted panels sit on a clean off-white canvas, with blue accents for primary actions, selected navigation and focus. Existing dark or Darcula preferences remain supported.
 
 AutoPlug targets Java 9 or later. Minecraft runs in a separate JVM selected from its version metadata. Settings supports Java 8, 17 and 21 executable overrides and additional `major=path` entries. If no matching runtime is configured or already installed, AutoPlug uses its Adoptium provider to download one. Runtime availability depends on the operating system and architecture.
 
@@ -17,7 +17,7 @@ The browser imports favorites from the standard Minecraft `servers.dat` when the
 
 ### Dashboard previews
 
-These previews render the actual Swing components with synthetic fixture data at 1200 × 820 pixels. They show the layout and available controls; they do not demonstrate live Microsoft authentication, server connectivity or router sharing. The fixture data and rendering helper are in `DashboardPanelTest`.
+These previews render the actual Swing components in the default light theme with synthetic fixture data at 1200 × 820 pixels. They show the layout and available controls; they do not demonstrate live Microsoft authentication, server connectivity or router sharing. The fixture data and rendering helper are in `DashboardPanelTest`.
 
 **Profiles:** isolated client and server collections, reusable templates, and migration controls.
 

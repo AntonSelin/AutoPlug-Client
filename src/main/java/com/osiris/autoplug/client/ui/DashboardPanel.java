@@ -73,6 +73,7 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
         for (int i = 0; i < names.length; i++) {
             String name = names[i]; pages.add(views[i], name);
             JToggleButton button = new JToggleButton(name); button.setHorizontalAlignment(SwingConstants.LEFT);
+            DashboardTheme.navigation(button);
             button.setPreferredSize(new Dimension(170, 43));
             button.setMaximumSize(new Dimension(Integer.MAX_VALUE, 43)); button.setAlignmentX(Component.LEFT_ALIGNMENT);
             button.addActionListener(e -> { cards.show(pages, name); if (name.equals("Worlds")) refreshWorlds(); });
@@ -89,7 +90,7 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
     }
 
     @Override protected void paintComponent(Graphics graphics) {
-        super.paintComponent(graphics); DashboardTheme.landscape(graphics, getWidth(), getHeight());
+        super.paintComponent(graphics); DashboardTheme.canvas(graphics, getWidth(), getHeight());
     }
     @Override public void updateUI() { super.updateUI(); DashboardTheme.refreshColors(this); }
 
@@ -99,7 +100,7 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
         content.add(toolbar(button("Add server", this::addServer), button("Import Minecraft", () -> run("Importing favorites", () -> {
             int count = browser.importVanilla(); return count;
         }, count -> { status.setText("Imported " + count + " new favorites from " + browser.vanillaFile()); refreshServers(); })),
-                button("Refresh status", this::refreshServers), button("Join selected", this::joinSelected),
+                button("Refresh status", this::refreshServers), primaryButton("Join selected", this::joinSelected),
                 button("Remove", this::removeServer)), BorderLayout.NORTH);
         serverTable.getColumnModel().getColumn(3).setPreferredWidth(220);
         content.add(tableScroll(serverTable), BorderLayout.CENTER);
@@ -222,12 +223,12 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
         JPanel page = page("Profiles", "Isolated modpacks and pluginpacks, reusable across worlds and servers.");
         JPanel content = content();
         typeFilter.addActionListener(e -> showProfiles());
-        content.add(toolbar(typeFilter, button("Create", this::createProfile), button("Clone / migrate", () -> cloneProfile(selectedProfile(), null)),
+        content.add(toolbar(typeFilter, primaryButton("Create", this::createProfile), button("Clone / migrate", () -> cloneProfile(selectedProfile(), null)),
                 button("Check", () -> checkOrUpdate(false)), button("Update", () -> checkOrUpdate(true)), button("Refresh", this::refreshProfiles)), BorderLayout.NORTH);
         content.add(tableScroll(profileTable), BorderLayout.CENTER);
         JPanel bottom = DashboardTheme.transparent(new BorderLayout(0, 8));
         bottom.setBorder(new EmptyBorder(12, 0, 0, 0)); bottom.add(DashboardTheme.scroll(profileDetails), BorderLayout.CENTER);
-        bottom.add(toolbar(button("Launch client", () -> {
+        bottom.add(toolbar(primaryButton("Launch client", () -> {
             ProfileInfo profile = selectedProfile(); if (!ready(profile)) return;
             if (!"MODS".equalsIgnoreCase(profile.type)) { information("Client profiles", "Choose a MODS profile to launch the Minecraft client."); return; }
             run("Launching client", () -> { actions.launchProfile(profile.id, null, 25565); return null; }, ignored -> {});
@@ -330,7 +331,7 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
         JPanel page = page("Worlds", "Your Minecraft saves and managed worlds, together in one place.");
         JPanel content = DashboardTheme.transparent(new BorderLayout(0, 12));
         JPanel controls = DashboardTheme.surface(new BorderLayout(), 8);
-        controls.add(toolbar(button("Create world", this::createWorld), button("Refresh", this::refreshWorlds)));
+        controls.add(toolbar(primaryButton("Create world", this::createWorld), button("Refresh", this::refreshWorlds)));
         content.add(controls, BorderLayout.NORTH);
         worldCards.setLayout(new BoxLayout(worldCards, BoxLayout.Y_AXIS));
         worldCards.setOpaque(false);
@@ -384,18 +385,18 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
             card.add(thumbnail, BorderLayout.WEST);
             JPanel details = DashboardTheme.transparent(new BorderLayout(0, 6));
             JPanel heading = DashboardTheme.transparent(new BorderLayout(0, 4));
-            JLabel kind = new JLabel(world.local ? "Singleplayer" : "Managed world" + (world.running ? "  ·  Running" : ""));
-            DashboardTheme.tint(kind, true); kind.setFont(kind.getFont().deriveFont(Font.BOLD, 11f));
+            JLabel kind = DashboardTheme.badge(world.local ? "Singleplayer" : "Managed world" + (world.running ? "  ·  Running" : ""));
+            JPanel badgeRow = DashboardTheme.transparent(new FlowLayout(FlowLayout.LEFT, 0, 0)); badgeRow.add(kind);
             JLabel name = new JLabel(world.name); name.setFont(name.getFont().deriveFont(Font.BOLD, 18f));
             name.putClientProperty("html.disable", Boolean.TRUE);
-            heading.add(kind, BorderLayout.NORTH); heading.add(name, BorderLayout.CENTER);
+            heading.add(badgeRow, BorderLayout.NORTH); heading.add(name, BorderLayout.CENTER);
             details.add(heading, BorderLayout.NORTH); JTextArea description = textArea(2);
             DashboardTheme.tint(description, false);
             description.setText((world.local ? "Minecraft " + (knownWorldVersion(world) ? world.gameVersion : "version unknown — choose before launch")
                     : "Server: " + profileName(world.serverProfileId) + "   ·   Client: " + profileName(world.clientProfileId)) + "\n" + world.directory);
             details.add(description, BorderLayout.CENTER);
-            if (world.local) details.add(toolbar(button("Launch", () -> launchLocalWorld(world)), button("Open folder", () -> openFolder(world.directory))), BorderLayout.SOUTH);
-            else details.add(toolbar(button("Play locally", () -> run("Starting world " + world.name, () -> { actions.launchWorld(world.id, false); return null; }, ignored -> refreshWorlds())),
+            if (world.local) details.add(toolbar(primaryButton("Launch", () -> launchLocalWorld(world)), button("Open folder", () -> openFolder(world.directory))), BorderLayout.SOUTH);
+            else details.add(toolbar(primaryButton("Play locally", () -> run("Starting world " + world.name, () -> { actions.launchWorld(world.id, false); return null; }, ignored -> refreshWorlds())),
                     button("Share", () -> {
                         if (!confirm("Share this world", "Share “" + world.name + "” beyond this PC?\nThis may open a router port using UPnP and expose the server to the internet.\nOnly share the join address with people you trust.")) return;
                         run("Preparing world sharing", () -> {
@@ -468,10 +469,10 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
                 "Other runtimes (major=path; …)", extraJava));
         content.add(Box.createVerticalStrut(16)); content.add(section("Defaults and networking"));
         content.add(fields("Default client profile", defaultProfile, "Preferred server port", port, "Sharing", upnp));
-        content.add(toolbar(button("Save settings", this::saveSettings), button("Reload", this::refreshSettings)));
+        content.add(toolbar(primaryButton("Save settings", this::saveSettings), button("Reload", this::refreshSettings)));
         content.add(Box.createVerticalStrut(24)); content.add(section("Minecraft account"));
         content.add(fields("Current account", account, "Microsoft app client ID", clientId, "Account storage", rememberAccount, "Offline player name", offlineName));
-        content.add(toolbar(button("Sign in with Microsoft", () -> {
+        content.add(toolbar(primaryButton("Sign in with Microsoft", () -> {
             if (!confirm("Microsoft sign-in", "Start Microsoft device sign-in?\nYou will authorize the displayed app in your browser. AutoPlug never asks for your Microsoft password.")) return;
             if (clientId.getText().trim().isEmpty()) { information("Microsoft client ID", "Enter and save the public client ID of your Microsoft application before signing in."); return; }
             SettingsInfo settings;
@@ -550,6 +551,7 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
     private static JPanel content() { return DashboardTheme.surface(new BorderLayout(0, 12), 16); }
     private static JPanel toolbar(JComponent... components) { JPanel panel = DashboardTheme.transparent(new FlowLayout(FlowLayout.LEFT, 6, 3)); for (JComponent component : components) panel.add(component); panel.setAlignmentX(Component.LEFT_ALIGNMENT); return panel; }
     private static JButton button(String text, Runnable action) { JButton button = new JButton(text); button.setMargin(new Insets(6, 14, 6, 14)); button.addActionListener(e -> action.run()); return button; }
+    private static JButton primaryButton(String text, Runnable action) { return DashboardTheme.primary(button(text, action)); }
     private static JTextArea textArea(int rows) { JTextArea area = new JTextArea(rows, 30); area.setEditable(false); area.setOpaque(false); area.setLineWrap(true); area.setWrapStyleWord(true); area.setFont(UIManager.getFont("Label.font")); return area; }
     private static DefaultTableModel model(String... columns) { return new DefaultTableModel(columns, 0) { @Override public boolean isCellEditable(int row, int column) { return false; } }; }
     private static JTable table(DefaultTableModel model) {

@@ -2,12 +2,14 @@ package com.osiris.autoplug.client.ui;
 
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
+import javax.swing.plaf.ColorUIResource;
 import java.awt.*;
 import java.awt.geom.RoundRectangle2D;
 
-/** Original, resolution-independent block landscape and translucent dashboard surfaces. */
+/** Neutral dashboard surfaces with a consistent blue accent in light and dark themes. */
 final class DashboardTheme {
     static final int ARC = 16;
+    private static final Color BLUE = new Color(0x0066FF);
 
     private DashboardTheme() {}
 
@@ -16,6 +18,22 @@ final class DashboardTheme {
         UIManager.put("Component.arc", ARC);
         UIManager.put("TextComponent.arc", ARC);
         UIManager.put("ProgressBar.arc", ARC);
+        UIManager.put("Component.focusColor", BLUE);
+        UIManager.put("Component.focusedBorderColor", BLUE);
+        UIManager.put("Button.focusedBorderColor", BLUE);
+        UIManager.put("ToggleButton.selectedBackground", BLUE);
+        UIManager.put("ToggleButton.selectedForeground", Color.WHITE);
+        UIManager.put("ToggleButton.focusedBorderColor", BLUE);
+        UIManager.put("TabbedPane.underlineColor", BLUE);
+        UIManager.put("ProgressBar.foreground", BLUE);
+        UIManager.put("CheckBox.icon.selectedBackground", BLUE);
+        UIManager.put("CheckBox.icon.selectedBorderColor", BLUE);
+        UIManager.put("CheckBox.icon.checkmarkColor", Color.WHITE);
+        UIManager.put("Table.selectionBackground", BLUE);
+        UIManager.put("Table.selectionForeground", Color.WHITE);
+        UIManager.put("TableHeader.background", new ColorUIResource(dark() ? 0x2B3443 : 0xF3F6FB));
+        UIManager.put("TableHeader.foreground", new ColorUIResource(dark() ? 0xE4EAF5 : 0x34435A));
+        UIManager.put("Table.gridColor", new ColorUIResource(dark() ? 0x3A4555 : 0xE4EAF3));
     }
 
     static boolean dark() {
@@ -23,8 +41,41 @@ final class DashboardTheme {
         return background != null && background.getRed() + background.getGreen() + background.getBlue() < 420;
     }
 
-    static Color muted() { return dark() ? new Color(0xB6C6CD) : new Color(0x4A606A); }
-    static Color accent() { return dark() ? new Color(0xA3D7BF) : new Color(0x286C52); }
+    static Color muted() { return dark() ? new Color(0xBCC8DA) : new Color(0x526176); }
+    static Color accent() { return dark() ? new Color(0x8AB8FF) : BLUE; }
+
+    static JButton primary(JButton button) {
+        button.setBackground(BLUE); button.setForeground(Color.WHITE);
+        button.setFont(button.getFont().deriveFont(Font.BOLD));
+        return button;
+    }
+
+    static void navigation(JToggleButton button) {
+        button.putClientProperty("AutoPlug.navigation", Boolean.TRUE);
+        button.addItemListener(event -> refreshNavigation(button));
+        refreshNavigation(button);
+    }
+
+    private static void refreshNavigation(JToggleButton button) {
+        button.setBackground(button.isSelected() ? BLUE : (dark() ? new Color(0x273142) : new Color(0xF6F8FC)));
+        button.setForeground(button.isSelected() ? Color.WHITE : (dark() ? new Color(0xE4EAF5) : new Color(0x34435A)));
+    }
+
+    static JLabel badge(String text) {
+        JLabel label = new JLabel(text) {
+            @Override protected void paintComponent(Graphics graphics) {
+                Graphics2D g = (Graphics2D) graphics.create();
+                try {
+                    g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+                    g.setColor(dark() ? new Color(36, 75, 128, 150) : new Color(0xEAF2FF));
+                    g.fillRoundRect(0, 0, getWidth(), getHeight(), ARC, ARC);
+                } finally { g.dispose(); }
+                super.paintComponent(graphics);
+            }
+        };
+        label.setBorder(new EmptyBorder(2, 8, 2, 8)); tint(label, true);
+        label.setFont(label.getFont().deriveFont(Font.BOLD, 11f)); return label;
+    }
 
     static void tint(JComponent component, boolean accent) {
         component.putClientProperty("AutoPlug.accent", accent);
@@ -35,6 +86,8 @@ final class DashboardTheme {
         if (component instanceof JComponent) {
             Object accent = ((JComponent) component).getClientProperty("AutoPlug.accent");
             if (accent instanceof Boolean) component.setForeground((Boolean) accent ? accent() : muted());
+            if (component instanceof JToggleButton && Boolean.TRUE.equals(((JComponent) component).getClientProperty("AutoPlug.navigation")))
+                refreshNavigation((JToggleButton) component);
         }
         if (component instanceof Container) for (Component child : ((Container) component).getComponents()) refreshColors(child);
     }
@@ -56,51 +109,12 @@ final class DashboardTheme {
         return scroll;
     }
 
-    /** Paints only geometric artwork authored here; no Minecraft assets or remote images. */
-    static void landscape(Graphics graphics, int width, int height) {
+    static void canvas(Graphics graphics, int width, int height) {
         if (width <= 0 || height <= 0) return;
         Graphics2D g = (Graphics2D) graphics.create();
         try {
-            g.scale(width / 1200.0, height / 800.0);
-            g.setPaint(new GradientPaint(0, 0, new Color(0x101E2C), 0, 800, new Color(0x496065)));
-            g.fillRect(0, 0, 1200, 800);
-            // Sparse square stars and a pale block moon keep the sky quiet behind the content.
-            g.setColor(new Color(207, 224, 226, 62));
-            int[][] stars = {{220, 86}, {392, 160}, {595, 94}, {726, 208}, {919, 100}, {1094, 184}};
-            for (int[] star : stars) g.fillRect(star[0], star[1], 3, 3);
-            g.setColor(new Color(182, 204, 208, 82)); g.fillRect(996, 83, 56, 56);
-            g.setColor(new Color(31, 47, 61, 110)); g.fillRect(1014, 83, 38, 38);
-            ridge(g, new Color(0x344B55), 800, new int[]{0, 180, 320, 470, 640, 830, 990, 1200},
-                    new int[]{400, 360, 420, 310, 366, 290, 360, 336});
-            ridge(g, new Color(0x293F46), 800, new int[]{0, 140, 290, 420, 590, 730, 910, 1080, 1200},
-                    new int[]{480, 440, 504, 466, 534, 458, 492, 436, 480});
-            ridge(g, new Color(0x213A36), 800, new int[]{0, 154, 310, 492, 680, 870, 1032, 1200},
-                    new int[]{628, 560, 606, 646, 594, 554, 612, 584});
-            // Top faces, rock layers and small block trees suggest a playable landscape.
-            g.setColor(new Color(0x3B5647));
-            g.fillRect(0, 628, 154, 10); g.fillRect(154, 560, 156, 10);
-            g.fillRect(870, 554, 162, 10); g.fillRect(1032, 612, 168, 10);
-            g.setColor(new Color(0x263B38));
-            g.fillRect(46, 698, 170, 28); g.fillRect(970, 710, 230, 22);
-            tree(g, 194, 560, 1.0); tree(g, 929, 554, 1.3); tree(g, 1112, 612, .85);
-            g.setPaint(new GradientPaint(0, 0, new Color(4, 12, 19, 66), 0, 800, new Color(4, 12, 19, 22)));
-            g.fillRect(0, 0, 1200, 800);
-        } finally { g.dispose(); }
-    }
-
-    private static void ridge(Graphics2D g, Color color, int bottom, int[] x, int[] y) {
-        Polygon polygon = new Polygon(); polygon.addPoint(x[0], bottom); polygon.addPoint(x[0], y[0]);
-        for (int i = 1; i < x.length; i++) { polygon.addPoint(x[i], y[i - 1]); polygon.addPoint(x[i], y[i]); }
-        polygon.addPoint(x[x.length - 1], bottom); g.setColor(color); g.fillPolygon(polygon);
-    }
-
-    private static void tree(Graphics2D graphics, int x, int ground, double scale) {
-        Graphics2D g = (Graphics2D) graphics.create();
-        try {
-            g.translate(x, ground); g.scale(scale, scale);
-            g.setColor(new Color(0x29352F)); g.fillRect(-5, -58, 10, 58);
-            g.setColor(new Color(0x1D3430)); g.fillRect(-30, -86, 60, 35); g.fillRect(-21, -105, 42, 24);
-            g.setColor(new Color(0x30483A)); g.fillRect(-21, -105, 42, 5); g.fillRect(-30, -86, 25, 5);
+            g.setColor(dark() ? new Color(0x181E29) : new Color(0xF5F7FB));
+            g.fillRect(0, 0, width, height);
         } finally { g.dispose(); }
     }
 
@@ -111,7 +125,18 @@ final class DashboardTheme {
                 try {
                     g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
                     g.clip(new RoundRectangle2D.Float(0, 0, getWidth(), getHeight(), ARC, ARC));
-                    landscape(g, getWidth(), getHeight()); super.paintComponent(g);
+                    g.setColor(dark() ? new Color(0x263750) : new Color(0xEEF4FF));
+                    g.fillRect(0, 0, getWidth(), getHeight());
+                    if (getIcon() == null) {
+                        // A neutral world symbol while no saved thumbnail is available.
+                        g.setColor(accent()); g.setStroke(new BasicStroke(1.7f));
+                        int x = getWidth() / 2 - 21, y = getHeight() / 2 - 21;
+                        g.drawOval(x, y, 42, 42); g.drawOval(x + 11, y, 20, 42);
+                        g.drawLine(x, y + 21, x + 42, y + 21);
+                        g.drawArc(x + 3, y + 6, 36, 12, 180, 180);
+                        g.drawArc(x + 3, y + 25, 36, 12, 0, 180);
+                    }
+                    super.paintComponent(g);
                 } finally { g.dispose(); }
             }
         };
@@ -125,11 +150,11 @@ final class DashboardTheme {
             Graphics2D g = (Graphics2D) graphics.create();
             try {
                 g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-                Color top = dark() ? new Color(34, 47, 54, 232) : new Color(246, 250, 250, 237);
-                Color bottom = dark() ? new Color(23, 35, 42, 221) : new Color(230, 239, 239, 224);
+                Color top = dark() ? new Color(39, 49, 65, 242) : new Color(255, 255, 255, 245);
+                Color bottom = dark() ? new Color(32, 41, 56, 230) : new Color(250, 252, 255, 225);
                 g.setPaint(new GradientPaint(0, 0, top, 0, Math.max(1, getHeight()), bottom));
                 g.fillRoundRect(0, 0, getWidth(), getHeight(), ARC, ARC);
-                g.setColor(dark() ? new Color(215, 235, 237, 36) : new Color(255, 255, 255, 155));
+                g.setColor(dark() ? new Color(149, 171, 204, 55) : new Color(209, 219, 234, 190));
                 g.draw(new RoundRectangle2D.Float(.5f, .5f, getWidth() - 1f, getHeight() - 1f, ARC, ARC));
             } finally { g.dispose(); }
             super.paintComponent(graphics);

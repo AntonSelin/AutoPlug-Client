@@ -55,6 +55,7 @@ public class MainWindow extends JFrame {
             if ("dark".equals(theme)) FlatDarkLaf.setup();
             else if ("darcula".equals(theme)) FlatDarculaLaf.setup();
             else FlatLightLaf.setup();
+            DashboardTheme.installDefaults();
             if (isDisplayable()) SwingUtilities.invokeLater(() -> SwingUtilities.updateComponentTreeUI(this));
         } catch (Exception e) { AL.warn("Failed to initialize the dashboard theme", e); }
     }
