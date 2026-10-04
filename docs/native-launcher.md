@@ -15,6 +15,8 @@ The header names the current tab, and common actions have icons with text or acc
 3. In **Settings**, select an offline player name or sign in with Microsoft. Configure runtime overrides only if automatic selection is unsuitable.
 4. Use **Launch client**, or select a server in **Server Browser** and choose a compatible client profile. If no client profiles exist, the dashboard prepares defaults before continuing. The browser shows Minecraft version, MOTD, player count and latency through AutoPlug's existing status ping. A server's reported version is not proof that every installed mod will be compatible; review the selected loader and collection.
 
+Server Browser presents favorites as responsive cards, with a generic server icon, address, connection state, MOTD, player count, reported version and latency. Each card keeps Join, Ping, Copy address, Edit and Remove nearby. Search and sorting help navigate larger lists; keyboard navigation and accessible action labels remain available. The generic icons are local UI artwork, not fetched server logos.
+
 The browser imports favorites from the standard Minecraft `servers.dat` when the dashboard starts. Importing reads the vanilla file and keeps AutoPlug favorites separately; it does not rewrite the vanilla file. Favorites can also be added through the dashboard or CLI.
 
 ### Dashboard previews
@@ -33,11 +35,11 @@ These previews render the actual Swing components in the default light theme wit
 
 ![Settings dashboard with an offline fixture account and empty Microsoft application ID](images/native-launcher/settings.png)
 
-**Server Browser:** action icons retain labels or accessible tooltips.
+**Server Browser:** responsive cards show fixture connection states and server details; action icons retain labels or accessible tooltips.
 
 ![Server Browser with fixture favorites and action icons](images/native-launcher/server-browser.png)
 
-Additional settings previews show the [dark theme](images/native-launcher/settings-dark.png) and [compact 950 × 620 layout](images/native-launcher/settings-compact.png).
+Additional Server Browser previews show the [dark theme](images/native-launcher/server-browser-dark.png) and [compact 950 × 620 layout](images/native-launcher/server-browser-compact.png). Settings previews show the [dark theme](images/native-launcher/settings-dark.png) and [compact 950 × 620 layout](images/native-launcher/settings-compact.png).
 
 ## Profiles and migration
 

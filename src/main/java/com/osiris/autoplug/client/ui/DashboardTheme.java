@@ -57,7 +57,19 @@ final class DashboardTheme {
                     g.setColor(component.isEnabled() ? component.getForeground() : muted());
                     g.setStroke(new BasicStroke(1.6f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
                     String key = action.toLowerCase(java.util.Locale.ROOT);
-                    if (key.contains("play") || key.contains("launch") || key.contains("join") || key.equals("start")) {
+                    if (key.equals("players")) {
+                        g.drawOval(3, 2, 5, 5); g.drawOval(10, 4, 4, 4); g.drawArc(1, 9, 10, 11, 0, 180); g.drawArc(9, 10, 8, 9, 0, 150);
+                    } else if (key.equals("version")) {
+                        g.drawRoundRect(2, 3, 14, 12, 2, 2); g.drawLine(2, 7, 16, 7); g.fillOval(4, 4, 1, 1); g.drawLine(5, 10, 8, 10); g.drawLine(5, 12, 12, 12);
+                    } else if (key.equals("address")) {
+                        g.drawRoundRect(2, 5, 9, 7, 4, 4); g.drawRoundRect(7, 8, 9, 7, 4, 4);
+                    } else if (key.equals("sort")) {
+                        g.drawLine(5, 3, 5, 15); g.drawLine(2, 6, 5, 3); g.drawLine(8, 6, 5, 3); g.drawLine(12, 3, 12, 15); g.drawLine(9, 12, 12, 15); g.drawLine(15, 12, 12, 15);
+                    } else if (key.equals("online")) {
+                        g.drawOval(2, 2, 14, 14); g.drawPolyline(new int[]{5, 8, 13}, new int[]{9, 12, 6}, 3);
+                    } else if (key.equals("offline-server")) {
+                        g.drawOval(2, 2, 14, 14); g.drawLine(5, 9, 13, 9);
+                    } else if (key.contains("play") || key.contains("launch") || key.contains("join") || key.equals("start")) {
                         Path2D p = new Path2D.Float(); p.moveTo(5, 3); p.lineTo(15, 9); p.lineTo(5, 15); p.closePath(); g.fill(p);
                     } else if (key.contains("folder") || key.contains("configuration")) {
                         Path2D p = new Path2D.Float(); p.moveTo(2, 5); p.lineTo(7, 5); p.lineTo(9, 7); p.lineTo(16, 7); p.lineTo(15, 15); p.lineTo(2, 15); p.closePath(); g.draw(p);
@@ -196,6 +208,24 @@ final class DashboardTheme {
         label.setPreferredSize(new Dimension(96, 96)); return label;
     }
 
+    /** An original fallback symbol, not a fetched server logo. */
+    static Icon serverIcon() {
+        return new Icon() {
+            public int getIconWidth() { return 52; }
+            public int getIconHeight() { return 52; }
+            public void paintIcon(Component component, Graphics graphics, int x, int y) {
+                Graphics2D g = (Graphics2D) graphics.create();
+                try {
+                    g.translate(x, y); g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+                    g.setColor(dark() ? new Color(0x263E61) : new Color(0xEAF2FF)); g.fillRoundRect(0, 0, 52, 52, ARC, ARC);
+                    g.setColor(accent()); g.setStroke(new BasicStroke(1.8f));
+                    g.drawRoundRect(12, 12, 28, 12, 4, 4); g.drawRoundRect(12, 29, 28, 12, 4, 4);
+                    g.fillOval(17, 17, 3, 3); g.fillOval(17, 34, 3, 3); g.drawLine(25, 18, 34, 18); g.drawLine(25, 35, 34, 35);
+                } finally { g.dispose(); }
+            }
+        };
+    }
+
     private static final class Surface extends JPanel {
         Surface(LayoutManager layout) { super(layout); setOpaque(false); }
         @Override public Dimension getMaximumSize() { return new Dimension(Integer.MAX_VALUE, getPreferredSize().height); }
@@ -207,8 +237,10 @@ final class DashboardTheme {
                 Color bottom = dark() ? new Color(32, 41, 56, 230) : new Color(250, 252, 255, 225);
                 g.setPaint(new GradientPaint(0, 0, top, 0, Math.max(1, getHeight()), bottom));
                 g.fillRoundRect(0, 0, getWidth(), getHeight(), ARC, ARC);
-                g.setColor(dark() ? new Color(149, 171, 204, 55) : new Color(209, 219, 234, 190));
-                g.draw(new RoundRectangle2D.Float(.5f, .5f, getWidth() - 1f, getHeight() - 1f, ARC, ARC));
+                boolean selected = Boolean.TRUE.equals(getClientProperty("AutoPlug.selected"));
+                g.setColor(selected ? accent() : dark() ? new Color(149, 171, 204, 55) : new Color(209, 219, 234, 190));
+                g.setStroke(new BasicStroke(selected ? 2f : 1f));
+                g.draw(new RoundRectangle2D.Float(1f, 1f, getWidth() - 2f, getHeight() - 2f, ARC, ARC));
             } finally { g.dispose(); }
             super.paintComponent(graphics);
         }

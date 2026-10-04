@@ -3,6 +3,8 @@ package com.osiris.autoplug.client.ui;
 import com.formdev.flatlaf.FlatLightLaf;
 import com.formdev.flatlaf.FlatDarkLaf;
 import com.osiris.autoplug.client.browser.ServerBrowserService;
+import com.osiris.autoplug.client.browser.SavedServer;
+import com.osiris.autoplug.client.browser.ServerStatus;
 import com.osiris.autoplug.client.ui.LauncherActions.*;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -12,6 +14,9 @@ import java.awt.*;
 import java.awt.image.BufferedImage;
 import java.nio.file.*;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -90,11 +95,119 @@ class DashboardPanelTest {
                 assertTrue(grid.getComponent(1).getY() >= grid.getComponent(0).getHeight());
                 assertTrue(runtime.getWidth() >= 80); assertEquals("/chosen/java", runtime.getText());
                 assertNotNull(findButton(panel.get(), "Save settings"));
-                AbstractButton copy = findAccessibleButton(panel.get(), "Copy address");
-                assertNotNull(copy); assertNotNull(copy.getIcon()); assertEquals("Copy address", copy.getToolTipText());
+                AbstractButton importer = findAccessibleButton(panel.get(), "Import Minecraft");
+                assertNotNull(importer); assertNotNull(importer.getIcon()); assertEquals("Import Minecraft", importer.getToolTipText());
             });
         } finally { SwingUtilities.invokeAndWait(() -> panel.get().close()); }
     }
+
+    @Test void serverCardJoinKeepsAddressThroughRefreshDuringDefaultPreparation() throws Exception {
+        CountDownLatch preparing = new CountDownLatch(1), release = new CountDownLatch(1), launched = new CountDownLatch(1);
+        AtomicBoolean prepared = new AtomicBoolean(); AtomicReference<List<String>> request = new AtomicReference<>();
+        ProfileInfo client = new ProfileInfo("ready", "Default", "1.21.1", "VANILLA", "MODS", "", false);
+        LauncherActions actions = new LauncherActions() {
+            @Override public List<ProfileInfo> profiles() { return prepared.get() ? Arrays.asList(client) : Collections.emptyList(); }
+            @Override public ProfileInfo ensureDefaultProfiles(String version) throws Exception {
+                assertFalse(SwingUtilities.isEventDispatchThread()); assertEquals("1.21.1", version);
+                preparing.countDown(); assertTrue(release.await(4, TimeUnit.SECONDS)); prepared.set(true); return client;
+            }
+            @Override public void launchProfile(String id, String host, int port) {
+                assertFalse(SwingUtilities.isEventDispatchThread()); request.set(Arrays.asList(id, host, String.valueOf(port))); launched.countDown();
+            }
+        };
+        SavedServer first = new SavedServer("Same name", "first.example.invalid:25566"), second = new SavedServer("Same name", "second.example.invalid:25567");
+        Map<String, ServerStatus> statuses = new LinkedHashMap<>(); statuses.put(first.address, onlineStatus("First", "1.21.1")); statuses.put(second.address, onlineStatus("Second", "1.21.1"));
+        AtomicReference<DashboardPanel> panel = new AtomicReference<>();
+        SwingUtilities.invokeAndWait(() -> panel.set(new DashboardPanel(actions, new ServerBrowserService(directory.resolve("servers.json"), directory.resolve("servers.dat")), false)));
+        try {
+            awaitUi(() -> !findNamed(panel.get(), "activity-progress").isVisible());
+            SwingUtilities.invokeAndWait(() -> {
+                panel.get().displayServers(Arrays.asList(first, second), statuses);
+                findButton(findNamed(panel.get(), "server-" + first.address), "Join").doClick();
+            });
+            assertTrue(preparing.await(4, TimeUnit.SECONDS));
+            SwingUtilities.invokeAndWait(() -> {
+                panel.get().displayServers(Arrays.asList(second, first), statuses);
+                ((AbstractButton) findNamed(panel.get(), "select-server-" + second.address)).doClick();
+            });
+            release.countDown(); assertTrue(launched.await(4, TimeUnit.SECONDS));
+            assertEquals(Arrays.asList("ready", "first.example.invalid", "25566"), request.get());
+        } finally { release.countDown(); SwingUtilities.invokeAndWait(() -> panel.get().close()); }
+    }
+
+    @Test void serverCardsRejectStalePingsAndKeepCurrentVersionForKeyboardJoin() throws Exception {
+        CountDownLatch launched = new CountDownLatch(1); AtomicReference<String> launchedProfile = new AtomicReference<>();
+        LauncherActions actions = new LauncherActions() {
+            @Override public List<ProfileInfo> profiles() { return Arrays.asList(
+                    new ProfileInfo("newer", "Newer", "1.21.1", "VANILLA", "MODS", "", false),
+                    new ProfileInfo("older", "Older", "1.20.1", "VANILLA", "MODS", "", false)); }
+            @Override public void launchProfile(String id, String host, int port) { launchedProfile.set(id); launched.countDown(); }
+        };
+        SavedServer first = new SavedServer("First", "first.example.invalid"), removed = new SavedServer("Removed", "removed.example.invalid");
+        AtomicReference<DashboardPanel> panel = new AtomicReference<>();
+        SwingUtilities.invokeAndWait(() -> panel.set(new DashboardPanel(actions, new ServerBrowserService(directory.resolve("servers.json"), directory.resolve("servers.dat")), false)));
+        try {
+            awaitUi(() -> !findNamed(panel.get(), "activity-progress").isVisible());
+            SwingUtilities.invokeAndWait(() -> {
+                int oldGeneration = panel.get().displayServers(Arrays.asList(first, removed), Collections.emptyMap());
+                assertTrue(containsText(findNamed(panel.get(), "server-" + first.address), "Checking…"));
+                int generation = panel.get().displayServers(Arrays.asList(first), Collections.emptyMap());
+                panel.get().showPing(generation, first, onlineStatus("Current message", "1.20.1"));
+                panel.get().showPing(oldGeneration, first, onlineStatus("Stale message", "1.21.1"));
+                panel.get().showPing(oldGeneration, removed, onlineStatus("Removed result", "1.21.1"));
+                Container card = findNamed(panel.get(), "server-" + first.address);
+                assertTrue(containsText(card, "Current message")); assertTrue(containsText(card, "1.20.1"));
+                assertFalse(containsText(card, "Stale message")); assertNull(findNamed(panel.get(), "server-" + removed.address));
+                AbstractButton select = (AbstractButton) findNamed(card, "select-server-" + first.address);
+                Object binding = select.getInputMap(JComponent.WHEN_FOCUSED).get(KeyStroke.getKeyStroke("ENTER"));
+                assertNotNull(binding); select.getActionMap().get(binding).actionPerformed(new java.awt.event.ActionEvent(select, 0, "keyboard"));
+            });
+            assertTrue(launched.await(4, TimeUnit.SECONDS)); assertEquals("older", launchedProfile.get());
+        } finally { SwingUtilities.invokeAndWait(() -> panel.get().close()); }
+    }
+
+    @Test void serverCardsReflowFilterAndDisplayLiteralTextWithoutLosingControls() throws Exception {
+        AtomicReference<DashboardPanel> panel = new AtomicReference<>();
+        SwingUtilities.invokeAndWait(() -> { FlatLightLaf.setup(); panel.set(new DashboardPanel(new LauncherActions() {}, new ServerBrowserService(directory.resolve("servers.json"), directory.resolve("servers.dat")), false)); });
+        try {
+            awaitUi(() -> !findNamed(panel.get(), "activity-progress").isVisible());
+            SwingUtilities.invokeAndWait(() -> {
+                SavedServer first = new SavedServer("<html><b>Literal 雪</b> — A very long Minecraft favorite name", "first.example.invalid"), second = new SavedServer("Other", "second.example.invalid");
+                Map<String, ServerStatus> statuses = new LinkedHashMap<>();
+                statuses.put(first.address, onlineStatus("<html><img src='https://example.invalid/not-a-logo'>\nWelcome 雪", "Paper 1.21.1"));
+                statuses.put(second.address, new ServerStatus(false, "", "", 0, 0, 0, 0, "Connection refused"));
+                panel.get().displayServers(Arrays.asList(first, second), statuses);
+                Container firstCard = findNamed(panel.get(), "server-" + first.address), secondCard = findNamed(panel.get(), "server-" + second.address);
+                AbstractButton title = (AbstractButton) findNamed(firstCard, "select-server-" + first.address);
+                assertEquals(first.name, title.getText()); assertNull(title.getClientProperty(javax.swing.plaf.basic.BasicHTML.propertyKey));
+                assertTrue(containsText(firstCard, "<html><img")); assertTrue(containsText(firstCard, "Players: 12 / 40"));
+                assertTrue(containsText(secondCard, "Unavailable")); assertTrue(containsText(secondCard, "Connection refused"));
+                assertTrue(containsText(secondCard, "Latency: —"));
+                for (String action : new String[]{"Ping selected", "Copy address", "Edit server", "Remove"}) {
+                    AbstractButton button = findAccessibleButton(firstCard, action); assertNotNull(button); assertNotNull(button.getIcon()); assertTrue(button.isFocusable());
+                }
+                panel.get().setSize(1200, 820); for (int i = 0; i < 5; i++) layout(panel.get());
+                assertEquals(firstCard.getY(), secondCard.getY()); assertTrue(secondCard.getX() > firstCard.getX());
+                ((AbstractButton) findNamed(secondCard, "select-server-" + second.address)).doClick();
+                ((JComboBox<?>) findNamed(panel.get(), "server-sort")).setSelectedItem("Name");
+                assertTrue(((AbstractButton) findNamed(secondCard, "select-server-" + second.address)).isSelected());
+                panel.get().setSize(950, 620); for (int i = 0; i < 5; i++) layout(panel.get());
+                assertEquals(firstCard.getX(), secondCard.getX()); assertNotEquals(firstCard.getY(), secondCard.getY());
+                for (String action : new String[]{"Join", "Ping selected", "Copy address", "Edit server", "Remove"}) {
+                    AbstractButton button = findAccessibleButton(firstCard, action);
+                    Rectangle bounds = SwingUtilities.convertRectangle(button.getParent(), button.getBounds(), firstCard);
+                    assertTrue(bounds.width > 0 && bounds.x >= 0 && bounds.x + bounds.width <= firstCard.getWidth(), action + " must fit within its card");
+                }
+                JTextField search = (JTextField) findNamed(panel.get(), "server-search"); search.setText("first.example");
+                assertTrue(firstCard.isVisible()); assertFalse(secondCard.isVisible()); assertTrue(title.isSelected());
+                search.setText("no matching favorite"); assertFalse(firstCard.isVisible()); assertTrue(containsText(panel.get(), "No favorites match"));
+                search.setText(""); panel.get().displayServers(Collections.emptyList(), Collections.emptyMap());
+                assertEquals(0, findNamed(panel.get(), "server-cards").getComponentCount()); assertTrue(containsText(panel.get(), "Add a server or import"));
+            });
+        } finally { SwingUtilities.invokeAndWait(() -> panel.get().close()); }
+    }
+
+    private static ServerStatus onlineStatus(String message, String version) { return new ServerStatus(true, message, version, 12, 40, 0, 38, "SUCCESS"); }
 
     @Test void parallelDownloadCompletionKeepsProgressVisibleUntilLastTransferEnds() throws Exception {
         AtomicReference<DashboardPanel> panel = new AtomicReference<>();
@@ -279,8 +392,15 @@ class DashboardPanelTest {
             panel.set(new DashboardPanel(fixtures(new AtomicBoolean(), calls), new ServerBrowserService(data.resolve("servers.json"), data.resolve("servers.dat")), true));
         });
         calls.await(4, TimeUnit.SECONDS);
-        // Waiting behind the worker callbacks allows the fixture models to arrive before printing.
-        Thread.sleep(250);
+        // The empty local import finishes before injecting render-only examples; no server is pinged.
+        awaitUi(() -> !findNamed(panel.get(), "activity-progress").isVisible());
+        SwingUtilities.invokeAndWait(() -> {
+            SavedServer online = new SavedServer("Quiet Cove", "cove.example.invalid"), unavailable = new SavedServer("Skyline Survival", "skyline.example.invalid:25566"), checking = new SavedServer("Weekend Adventure", "weekend.example.invalid");
+            Map<String, ServerStatus> statuses = new LinkedHashMap<>();
+            statuses.put(online.address, onlineStatus("A relaxed place to build, explore, and meet friends.\nNew adventures every weekend.", "Paper 1.21.1"));
+            statuses.put(unavailable.address, new ServerStatus(false, "", "", 0, 0, 0, 0, "Could not reach the server. Try again when it is online."));
+            panel.get().displayServers(Arrays.asList(online, unavailable, checking), statuses);
+        });
         try {
             for (String view : new String[]{"Server Browser", "Worlds", "Profiles", "Server Manager", "Settings"}) {
                 SwingUtilities.invokeAndWait(() -> findButton(panel.get(), view).doClick());

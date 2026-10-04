@@ -38,8 +38,12 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
     private final JTextField sourceUrl = new JTextField();
     private final JTextArea activity = textArea(5);
     private final JLabel serverEmpty = new JLabel("Add a server or import Minecraft favorites to get started.", SwingConstants.CENTER);
-    private final DefaultTableModel serverModel = model("Name", "Address", "Status", "MOTD", "Players", "Version", "Latency");
-    private final JTable serverTable = table(serverModel);
+    private final ServerGrid serverCards = new ServerGrid();
+    private final JTextField serverSearch = new JTextField(18);
+    private final JComboBox<String> serverSort = new JComboBox<>(new String[]{"Favorite order", "Name", "Address", "Status", "MOTD", "Players", "Version", "Latency"});
+    private final JToggleButton reverseServerSort = new JToggleButton("Descending");
+    private final Map<String, ServerCard> serverViews = new LinkedHashMap<>();
+    private String selectedServerAddress;
     private final DefaultTableModel profileModel = model("Name", "Minecraft", "Loader", "Type", "Template", "Ready");
     private final JTable profileTable = table(profileModel);
     private final JPanel worldCards = new WorldList();
@@ -120,19 +124,32 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
 
     private JPanel serverPage() {
         JPanel page = page("Server Browser", "Your Minecraft favorites, with live status and matching local profiles.");
-        JPanel content = content();
-        content.add(toolbar(button("Add server", this::addServer), iconButton("Import Minecraft", "import", () -> run("Importing favorites", () -> {
+        JPanel content = DashboardTheme.transparent(new BorderLayout(0, 12));
+        JPanel controls = DashboardTheme.surface(new BorderLayout(0, 6), 10);
+        controls.add(toolbar(primaryButton("Add server", this::addServer), button("Import Minecraft", () -> run("Importing favorites", () -> {
             int count = browser.importVanilla(); return count;
         }, count -> { status.setText("Imported " + count + " new favorites from " + browser.vanillaFile()); refreshServers(); })),
-                iconButton("Refresh status", "refresh", this::refreshServers), primaryButton("Join selected", this::joinSelected),
-                iconButton("Ping selected", "ping", this::pingSelected), iconButton("Copy address", "copy", this::copyServerAddress),
-                iconButton("Edit server", "edit", this::editServer), iconButton("Remove", "delete", this::removeServer)), BorderLayout.NORTH);
-        serverTable.getColumnModel().getColumn(3).setPreferredWidth(220);
+                button("Refresh status", this::refreshServers)), BorderLayout.NORTH);
+        serverSearch.setName("server-search"); serverSearch.setToolTipText("Search favorites by name, address or server message");
+        serverSearch.getAccessibleContext().setAccessibleName("Search servers");
+        serverSearch.putClientProperty("JTextField.placeholderText", "Search your favorites");
+        serverSort.setName("server-sort"); serverSort.getAccessibleContext().setAccessibleName("Sort servers");
+        reverseServerSort.setName("server-sort-descending"); reverseServerSort.setIcon(DashboardTheme.icon("sort"));
+        reverseServerSort.setToolTipText("Reverse the selected sort order");
+        controls.add(toolbar(new JLabel("Search"), serverSearch, new JLabel("Sort"), serverSort, reverseServerSort), BorderLayout.SOUTH);
+        serverSearch.getDocument().addDocumentListener(new javax.swing.event.DocumentListener() {
+            public void insertUpdate(javax.swing.event.DocumentEvent e) { arrangeServerCards(); }
+            public void removeUpdate(javax.swing.event.DocumentEvent e) { arrangeServerCards(); }
+            public void changedUpdate(javax.swing.event.DocumentEvent e) { arrangeServerCards(); }
+        });
+        serverSort.addActionListener(e -> arrangeServerCards()); reverseServerSort.addActionListener(e -> arrangeServerCards());
+        content.add(controls, BorderLayout.NORTH);
         JPanel list = DashboardTheme.transparent(new BorderLayout(0, 10));
-        DashboardTheme.tint(serverEmpty, false); serverEmpty.setBorder(new EmptyBorder(20, 0, 20, 0));
-        list.add(serverEmpty, BorderLayout.NORTH); list.add(tableScroll(serverTable)); content.add(list, BorderLayout.CENTER);
-        JLabel note = new JLabel("Server pings show version and players. Mods and loaders come from your local profiles.");
-        note.setBorder(new EmptyBorder(12, 0, 0, 0)); content.add(note, BorderLayout.SOUTH);
+        serverCards.setName("server-cards");
+        DashboardTheme.tint(serverEmpty, false); serverEmpty.setBorder(new EmptyBorder(40, 12, 40, 12));
+        list.add(serverEmpty, BorderLayout.NORTH); list.add(DashboardTheme.scroll(serverCards)); content.add(list, BorderLayout.CENTER);
+        JTextArea note = textArea(1); note.setText("Server details come from live pings. Join uses your local profiles and keeps version checks in place.");
+        DashboardTheme.tint(note, false); content.add(note, BorderLayout.SOUTH);
         page.add(content, BorderLayout.CENTER); return page;
     }
 
@@ -170,34 +187,187 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
     }
     private void pingSelected() {
         SavedServer selected = selectedServer(); if (selected == null) return;
+        serverStatuses.remove(selected.address); serverViews.get(selected.address).update(null);
         int generation = pingGeneration;
         run("Checking " + selected.name, () -> browser.ping(selected), ping -> showPing(generation, selected, ping));
     }
     private void showServers(List<SavedServer> result) {
-        int generation = ++pingGeneration;
-        servers = result; serverModel.setRowCount(0);
-        serverEmpty.setVisible(servers.isEmpty());
-        for (SavedServer server : servers) serverModel.addRow(new Object[]{server.name, server.address, "Checking…", "", "", "", ""});
+        displayServers(result, Collections.emptyMap());
+        int generation = pingGeneration;
         for (SavedServer server : servers) run("Checking " + server.name, () -> browser.ping(server), ping -> showPing(generation, server, ping));
     }
-    private void showPing(int generation, SavedServer server, ServerStatus ping) {
-            if (generation != pingGeneration) return;
-            serverStatuses.put(server.address, ping);
-            for (int i = 0; i < servers.size(); i++) if (servers.get(i).address.equals(server.address)) {
-                serverModel.setValueAt(ping.online ? "Online" : "Unavailable", i, 2);
-                serverModel.setValueAt(ping.online && ping.motd != null ? ping.motd.replace('\n', ' ') : ping.message, i, 3);
-                serverModel.setValueAt(ping.online ? ping.players + " / " + ping.capacity : "—", i, 4);
-                serverModel.setValueAt(ping.online ? ping.version : "—", i, 5);
-                serverModel.setValueAt(ping.online ? ping.latency + " ms" : "—", i, 6);
-            }
+    /** Render a snapshot without network work; also used by deterministic preview fixtures. */
+    int displayServers(List<SavedServer> result, Map<String, ServerStatus> statuses) {
+        ++pingGeneration; servers = new ArrayList<>(result); serverStatuses.clear(); serverStatuses.putAll(statuses);
+        serverCards.removeAll(); serverViews.clear();
+        for (SavedServer server : servers) {
+            ServerCard card = new ServerCard(server); serverViews.put(server.address, card); serverCards.add(card.panel);
+            card.update(serverStatuses.get(server.address));
+        }
+        arrangeServerCards();
+        return pingGeneration;
+    }
+    void showPing(int generation, SavedServer server, ServerStatus ping) {
+        if (generation != pingGeneration) return;
+        ServerCard card = serverViews.get(server.address); if (card == null) return;
+        serverStatuses.put(server.address, ping); card.update(ping); arrangeServerCards();
     }
     private SavedServer selectedServer() {
-        int row = serverTable.getSelectedRow();
-        if (row < 0) { status.setText("Select a server first."); return null; }
-        return servers.get(serverTable.convertRowIndexToModel(row));
+        ServerCard selected = serverViews.get(selectedServerAddress);
+        if (selected != null && selected.panel.isVisible()) return selected.server;
+        status.setText("Select a server first."); return null;
+    }
+    private void arrangeServerCards() {
+        String query = serverSearch.getText().trim().toLowerCase(Locale.ROOT);
+        List<ServerCard> ordered = new ArrayList<>(serverViews.values());
+        String sort = String.valueOf(serverSort.getSelectedItem());
+        Comparator<ServerCard> order = (left, right) -> 0;
+        if ("Name".equals(sort)) order = Comparator.comparing(card -> card.server.name, String.CASE_INSENSITIVE_ORDER);
+        else if ("Address".equals(sort)) order = Comparator.comparing(card -> card.server.address, String.CASE_INSENSITIVE_ORDER);
+        else if ("Status".equals(sort)) order = Comparator.comparing(card -> card.state.getText());
+        else if ("MOTD".equals(sort)) order = Comparator.comparing(card -> card.message.getText(), String.CASE_INSENSITIVE_ORDER);
+        else if ("Version".equals(sort)) order = Comparator.comparing(card -> card.version.getText(), String.CASE_INSENSITIVE_ORDER);
+        else if ("Players".equals(sort)) order = Comparator.comparingInt(card -> {
+            ServerStatus value = serverStatuses.get(card.server.address); return value != null && value.online ? value.players : -1;
+        });
+        else if ("Latency".equals(sort)) order = Comparator.comparingLong(card -> {
+            ServerStatus value = serverStatuses.get(card.server.address); return value != null && value.online ? value.latency : Long.MAX_VALUE;
+        });
+        if (!"Favorite order".equals(sort)) ordered.sort(order.thenComparing(card -> card.server.address));
+        if (reverseServerSort.isSelected()) Collections.reverse(ordered);
+        ServerCard firstVisible = null; int index = 0;
+        for (ServerCard card : ordered) {
+            serverCards.setComponentZOrder(card.panel, index++);
+            String text = card.server.name + " " + card.server.address + " " + card.message.getText() + " " + card.version.getText();
+            boolean visible = query.isEmpty() || text.toLowerCase(Locale.ROOT).contains(query);
+            card.panel.setVisible(visible); if (visible && firstVisible == null) firstVisible = card;
+        }
+        ServerCard selected = serverViews.get(selectedServerAddress);
+        if (selected == null || !selected.panel.isVisible()) selectedServerAddress = firstVisible == null ? null : firstVisible.server.address;
+        for (ServerCard card : ordered) card.selectionChanged();
+        serverEmpty.setText(servers.isEmpty() ? "Add a server or import Minecraft favorites to get started." : "No favorites match your search.");
+        serverEmpty.setVisible(firstVisible == null);
+        serverCards.revalidate(); serverCards.repaint();
+    }
+    private void selectServer(SavedServer server, boolean focus) {
+        selectedServerAddress = server.address;
+        for (ServerCard card : serverViews.values()) card.selectionChanged();
+        ServerCard selected = serverViews.get(server.address);
+        if (selected != null && focus) {
+            selected.select.requestFocusInWindow();
+            serverCards.scrollRectToVisible(selected.panel.getBounds());
+        }
+    }
+    private void navigateServer(SavedServer server, int offset) {
+        List<ServerCard> visible = new ArrayList<>();
+        for (Component component : serverCards.getComponents()) if (component.isVisible())
+            for (ServerCard card : serverViews.values()) if (card.panel == component) visible.add(card);
+        for (int i = 0; i < visible.size(); i++) if (visible.get(i).server.address.equals(server.address)) {
+            int next = Math.max(0, Math.min(visible.size() - 1, i + offset)); selectServer(visible.get(next).server, true); return;
+        }
+    }
+    private final class ServerCard {
+        final SavedServer server;
+        final JPanel panel = DashboardTheme.surface(new BorderLayout(0, 12), 16);
+        final JToggleButton select;
+        final JLabel state = DashboardTheme.badge("Checking…");
+        final JTextArea message = textArea(2);
+        final JLabel players = serverDetail("Players: —", "players"), version = serverDetail("Version: —", "version"), latency = serverDetail("Latency: —", "ping");
+        ServerCard(SavedServer server) {
+            this.server = server; panel.setName("server-" + server.address);
+            panel.getAccessibleContext().setAccessibleName("Favorite server " + server.name);
+            JPanel heading = DashboardTheme.transparent(new BorderLayout(10, 0));
+            JLabel icon = new JLabel(DashboardTheme.serverIcon()); icon.setToolTipText("Saved Minecraft server"); heading.add(icon, BorderLayout.WEST);
+            JPanel identity = DashboardTheme.transparent(new BorderLayout(0, 3));
+            select = new JToggleButton(); select.putClientProperty("html.disable", Boolean.TRUE); select.setText(server.name);
+            select.setName("select-server-" + server.address); select.setHorizontalAlignment(SwingConstants.LEFT);
+            select.setFont(select.getFont().deriveFont(Font.BOLD, 16f)); select.setMargin(new Insets(4, 5, 4, 5));
+            select.setToolTipText("Server: " + server.name + " — " + server.address); select.getAccessibleContext().setAccessibleName("Select server " + server.name);
+            select.getAccessibleContext().setAccessibleDescription("Arrow keys move between cards; Enter joins this server; Space selects it.");
+            select.addActionListener(e -> selectServer(server, false));
+            select.addFocusListener(new java.awt.event.FocusAdapter() { @Override public void focusGained(java.awt.event.FocusEvent e) { selectServer(server, false); } });
+            identity.add(select, BorderLayout.NORTH);
+            JLabel address = serverDetail(server.address, "address"); address.setName("server-address"); identity.add(address, BorderLayout.SOUTH);
+            heading.add(identity); panel.add(heading, BorderLayout.NORTH);
+            JPanel body = DashboardTheme.transparent(new BorderLayout(0, 10));
+            JPanel stateRow = DashboardTheme.transparent(new FlowLayout(FlowLayout.LEFT, 0, 0)); state.setName("server-status"); stateRow.add(state); body.add(stateRow, BorderLayout.NORTH);
+            message.setName("server-message"); message.setFocusable(false); message.setPreferredSize(new Dimension(100, 40)); DashboardTheme.tint(message, false);
+            body.add(message, BorderLayout.CENTER);
+            JPanel facts = DashboardTheme.transparent(new GridLayout(3, 1, 0, 5));
+            players.setName("server-players"); version.setName("server-version"); latency.setName("server-latency");
+            facts.add(players); facts.add(version); facts.add(latency); body.add(facts, BorderLayout.SOUTH); panel.add(body);
+            JPanel controls = toolbar(primaryButton("Join", () -> { selectServer(server, false); joinSelected(); }),
+                    iconButton("Ping selected", "ping", () -> { selectServer(server, false); pingSelected(); }),
+                    iconButton("Copy address", "copy", () -> { selectServer(server, false); copyServerAddress(); }),
+                    iconButton("Edit server", "edit", () -> { selectServer(server, false); editServer(); }),
+                    iconButton("Remove", "delete", () -> { selectServer(server, false); removeServer(); }));
+            for (Component child : controls.getComponents()) if (child instanceof AbstractButton) {
+                AbstractButton action = (AbstractButton) child;
+                action.getAccessibleContext().setAccessibleDescription(action.getToolTipText() + " for " + server.name + " at " + server.address);
+                action.addFocusListener(new java.awt.event.FocusAdapter() { @Override public void focusGained(java.awt.event.FocusEvent e) { selectServer(server, false); } });
+            }
+            panel.add(controls, BorderLayout.SOUTH);
+            bindServerKey("LEFT", "previous-server", () -> navigateServer(server, -1));
+            bindServerKey("RIGHT", "next-server", () -> navigateServer(server, 1));
+            bindServerKey("UP", "previous-server-row", () -> navigateServer(server, -serverCards.columns()));
+            bindServerKey("DOWN", "next-server-row", () -> navigateServer(server, serverCards.columns()));
+            bindServerKey("ENTER", "join-server", () -> { selectServer(server, false); joinSelected(); });
+            java.awt.event.MouseAdapter click = new java.awt.event.MouseAdapter() {
+                @Override public void mousePressed(java.awt.event.MouseEvent e) { selectServer(server, true); }
+            };
+            for (Component child : new Component[]{panel, heading, icon, address, body, stateRow, state, message, facts, players, version, latency}) child.addMouseListener(click);
+        }
+        private void bindServerKey(String key, String name, Runnable action) {
+            select.getInputMap(JComponent.WHEN_FOCUSED).put(KeyStroke.getKeyStroke(key), name);
+            select.getActionMap().put(name, new AbstractAction() { @Override public void actionPerformed(java.awt.event.ActionEvent event) { action.run(); } });
+        }
+        void selectionChanged() {
+            boolean selected = server.address.equals(selectedServerAddress); select.setSelected(selected);
+            panel.putClientProperty("AutoPlug.selected", selected); panel.repaint();
+        }
+        void update(ServerStatus ping) {
+            state.setText(ping == null ? "Checking…" : ping.online ? "Online" : "Unavailable");
+            state.setIcon(DashboardTheme.icon(ping != null && ping.online ? "online" : ping == null ? "ping" : "offline-server"));
+            String detail = ping == null ? "Checking this server’s status…" : ping.online ? Objects.toString(ping.motd, "") : Objects.toString(ping.message, "Status unavailable");
+            message.setText(detail); message.setCaretPosition(0); message.setToolTipText("Server message: " + detail); message.getAccessibleContext().setAccessibleName("Server message: " + detail);
+            players.setText("Players: " + (ping != null && ping.online ? ping.players + " / " + ping.capacity : "—"));
+            version.setText("Minecraft: " + (ping != null && ping.online ? Objects.toString(ping.version, "—") : "—"));
+            latency.setText("Latency: " + (ping != null && ping.online ? ping.latency + " ms" : "—"));
+            for (JLabel fact : new JLabel[]{players, version, latency}) fact.setToolTipText(fact.getText());
+        }
+    }
+    private static JLabel serverDetail(String text, String icon) {
+        JLabel label = new JLabel(); label.putClientProperty("html.disable", Boolean.TRUE); label.setText(text);
+        label.setIcon(DashboardTheme.icon(icon)); label.setHorizontalAlignment(SwingConstants.LEFT);
+        label.setToolTipText("Details: " + text); DashboardTheme.tint(label, false); return label;
+    }
+    private static final class ServerGrid extends JPanel implements Scrollable {
+        private static final int GAP = 14, CARD_HEIGHT = 322;
+        private int previousColumns;
+        ServerGrid() { super(null); setOpaque(false); }
+        int columns() { return getWidth() >= 800 ? 2 : 1; }
+        @Override public void doLayout() {
+            int columns = columns(), width = Math.max(0, (getWidth() - GAP * (columns - 1)) / columns), index = 0;
+            for (Component card : getComponents()) if (card.isVisible()) {
+                card.setBounds((index % columns) * (width + GAP), (index / columns) * (CARD_HEIGHT + GAP), width, CARD_HEIGHT); index++;
+            }
+            if (previousColumns != columns) { previousColumns = columns; revalidate(); }
+        }
+        @Override public Dimension getPreferredSize() {
+            int count = 0; for (Component card : getComponents()) if (card.isVisible()) count++;
+            int rows = (count + columns() - 1) / columns(); return new Dimension(0, Math.max(0, rows * (CARD_HEIGHT + GAP) - GAP));
+        }
+        @Override public Dimension getPreferredScrollableViewportSize() { return new Dimension(800, 520); }
+        @Override public int getScrollableUnitIncrement(Rectangle visible, int orientation, int direction) { return 24; }
+        @Override public int getScrollableBlockIncrement(Rectangle visible, int orientation, int direction) { return Math.max(24, visible.height - 24); }
+        @Override public boolean getScrollableTracksViewportWidth() { return true; }
+        @Override public boolean getScrollableTracksViewportHeight() { return false; }
     }
     private void joinSelected() {
         SavedServer server = selectedServer(); if (server == null) return;
+        joinServer(server);
+    }
+    private void joinServer(SavedServer server) {
         ServerStatus ping = serverStatuses.get(server.address);
         String targetVersion = ping != null && ping.online ? gameVersionFromStatus(ping.version) : "";
         List<ProfileInfo> clients = clientProfiles();
@@ -205,7 +375,7 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
             run("Preparing your default Minecraft profile", () -> { actions.ensureDefaultProfiles(targetVersion); return actions.profiles(); }, result -> {
                 profiles = result; showProfiles(); refreshDefaultProfiles();
                 if (clientProfiles().isEmpty()) information("Default profile unavailable", "AutoPlug could not prepare the default client. Check the activity details and try again.");
-                else joinSelected();
+                else joinServer(server);
             }); return;
         }
         ProfileInfo base = preferredBase(clients);
