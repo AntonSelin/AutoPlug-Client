@@ -18,6 +18,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.Callable;
 import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -30,39 +31,55 @@ public class MinecraftLauncher {
     private final Path cacheRoot;
     private final JavaRuntimeManager runtimes;
     private final String manifestUrl;
+    private final String assetBaseUrl;
     private final LoaderInstaller loaders;
 
     public MinecraftLauncher(Path cacheRoot, JavaRuntimeManager runtimes) { this(cacheRoot, runtimes, MANIFEST_URL); }
     MinecraftLauncher(Path cacheRoot, JavaRuntimeManager runtimes, String manifestUrl) {
+        this(cacheRoot, runtimes, manifestUrl, "https://resources.download.minecraft.net/");
+    }
+    MinecraftLauncher(Path cacheRoot, JavaRuntimeManager runtimes, String manifestUrl, String assetBaseUrl) {
         this.cacheRoot = cacheRoot.toAbsolutePath().normalize();
         this.runtimes = Objects.requireNonNull(runtimes, "runtimes");
         this.manifestUrl = manifestUrl;
+        this.assetBaseUrl = assetBaseUrl;
         this.loaders = new LoaderInstaller(this.cacheRoot);
     }
 
     public synchronized PreparedLaunch prepare(LaunchRequest request, Consumer<String> progress) throws Exception {
-        Consumer<String> log = progress == null ? value -> { } : progress;
+        Consumer<String> log = ParallelDownloads.serialized(progress);
         if (request.account.needsRefresh()) throw new IOException("Microsoft session expired. Refresh the account before launching.");
         Files.createDirectories(request.gameDir);
         JsonObject vanilla = version(request.version, log);
         int major = requiredJava(vanilla);
         Path java = runtimes.resolve(major, log);
-        Path client = downloadClient(vanilla, request.version, log);
+        Path client = clientPath(vanilla, request.version);
+        // Forge processors require the client jar before producing their merged profile.
+        // Vanilla, Fabric and Quilt can download it alongside all other game files.
+        boolean installerNeedsClient = request.loader.equals("FORGE") || request.loader.equals("NEOFORGE");
+        if (installerNeedsClient) downloadClient(vanilla, request.version, log);
         JsonObject loader = loaders.clientProfile(request, vanilla, client, java, log);
         JsonObject metadata = loader == null ? vanilla : merge(vanilla, loader);
         String id = metadata.get("id").getAsString();
         Path natives = LauncherFiles.child(request.gameDir.resolve(".autoplug").resolve("natives"), safeId(id) + "-" + osName() + "-" + System.getProperty("os.arch"));
         Files.createDirectories(natives);
-        List<Path> classpath = libraries(metadata, natives, log);
-        classpath.add(clientJarForProfile(client, metadata, cacheRoot));
+        List<Callable<Void>> downloads = new ArrayList<>();
+        List<Callable<Void>> extraction = new ArrayList<>();
+        if (!installerNeedsClient) downloads.add(() -> { downloadClient(vanilla, request.version, log); return null; });
+        List<Path> classpath = planLibraries(metadata, natives, downloads, extraction, log);
         Path assets = cacheRoot.resolve("assets");
-        String assetId = assets(metadata, assets, request.gameDir, log);
+        String assetId = planAssets(metadata, assets, request.gameDir, downloads, log);
         Path logging = null;
         if (metadata.has("logging") && metadata.getAsJsonObject("logging").has("client")) {
             JsonObject descriptor = metadata.getAsJsonObject("logging").getAsJsonObject("client").getAsJsonObject("file");
             logging = LauncherFiles.child(cacheRoot.resolve("logging"), descriptor.get("id").getAsString());
-            download(descriptor, logging, log);
+            Path target = logging;
+            downloads.add(() -> { download(descriptor, target, log); return null; });
         }
+        ParallelDownloads.run("Minecraft files", downloads, log);
+        // Native archives can share output filenames. Keep the publisher's extraction order.
+        for (Callable<Void> extract : extraction) extract.call();
+        classpath.add(clientJarForProfile(client, metadata, cacheRoot));
         List<String> args = buildArguments(metadata, request, classpath, natives, assets, assetId, logging);
         List<Path> temporaryFiles = new ArrayList<>();
         if (request.singleplayerWorld != null && !args.contains("--quickPlaySingleplayer")) {
@@ -176,11 +193,13 @@ public class MinecraftLauncher {
     static int requiredJava(JsonObject metadata) {
         return metadata.has("javaVersion") ? metadata.getAsJsonObject("javaVersion").get("majorVersion").getAsInt() : 8;
     }
-    private Path downloadClient(JsonObject metadata, String id, Consumer<String> progress) throws IOException {
+    private Path clientPath(JsonObject metadata, String id) throws IOException {
         if (!metadata.has("downloads") || !metadata.getAsJsonObject("downloads").has("client"))
             throw new IOException("This Minecraft version does not publish a client download.");
-        Path jar = LauncherFiles.child(cacheRoot.resolve("versions"), safeId(id) + "/" + safeId(id) + ".jar");
-        return download(metadata.getAsJsonObject("downloads").getAsJsonObject("client"), jar, progress);
+        return LauncherFiles.child(cacheRoot.resolve("versions"), safeId(id) + "/" + safeId(id) + ".jar");
+    }
+    private Path downloadClient(JsonObject metadata, String id, Consumer<String> progress) throws IOException {
+        return download(metadata.getAsJsonObject("downloads").getAsJsonObject("client"), clientPath(metadata, id), progress);
     }
     static Path download(JsonObject descriptor, Path path, Consumer<String> progress) throws IOException {
         return LauncherFiles.download(descriptor.get("url").getAsString(), path, string(descriptor, "sha1", null),
@@ -196,6 +215,19 @@ public class MinecraftLauncher {
         return jar;
     }
     List<Path> libraries(JsonObject metadata, Path natives, Consumer<String> progress) throws IOException {
+        Consumer<String> log = ParallelDownloads.serialized(progress);
+        List<Callable<Void>> downloads = new ArrayList<>(), extraction = new ArrayList<>();
+        List<Path> classpath = planLibraries(metadata, natives, downloads, extraction, log);
+        ParallelDownloads.run("Minecraft libraries", downloads, log);
+        for (Callable<Void> extract : extraction) {
+            try { extract.call(); }
+            catch (IOException e) { throw e; }
+            catch (Exception e) { throw new IOException("Native library extraction failed.", e); }
+        }
+        return classpath;
+    }
+    private List<Path> planLibraries(JsonObject metadata, Path natives, List<Callable<Void>> tasks,
+                                     List<Callable<Void>> extraction, Consumer<String> progress) throws IOException {
         List<Path> classpath = new ArrayList<>();
         if (!metadata.has("libraries")) return classpath;
         for (JsonElement entry : metadata.getAsJsonArray("libraries")) {
@@ -204,7 +236,9 @@ public class MinecraftLauncher {
             JsonObject downloads = library.has("downloads") ? library.getAsJsonObject("downloads") : new JsonObject();
             if (downloads.has("artifact")) {
                 JsonObject artifact = downloads.getAsJsonObject("artifact");
-                classpath.add(download(artifact, LauncherFiles.child(cacheRoot.resolve("libraries"), artifact.get("path").getAsString()), progress));
+                Path target = LauncherFiles.child(cacheRoot.resolve("libraries"), artifact.get("path").getAsString());
+                classpath.add(target);
+                tasks.add(() -> { download(artifact, target, progress); return null; });
             } else if (!library.has("natives") || !downloads.has("classifiers")) {
                 String relative = mavenPath(library.get("name").getAsString());
                 String base = string(library, "url", "https://libraries.minecraft.net/");
@@ -212,8 +246,14 @@ public class MinecraftLauncher {
                 if (base.isEmpty()) {
                     if (!Files.isRegularFile(artifact)) throw new IOException("Loader installer did not generate required library " + relative);
                     classpath.add(artifact);
-                } else classpath.add(LauncherFiles.download(base + (base.endsWith("/") ? "" : "/") + relative, artifact,
-                        string(library, "sha1", null), library.has("size") ? library.get("size").getAsLong() : -1, progress));
+                } else {
+                    classpath.add(artifact);
+                    tasks.add(() -> {
+                        LauncherFiles.download(base + (base.endsWith("/") ? "" : "/") + relative, artifact,
+                                string(library, "sha1", null), library.has("size") ? library.get("size").getAsLong() : -1, progress);
+                        return null;
+                    });
+                }
             }
             if (library.has("natives") && library.getAsJsonObject("natives").has(osName())) {
                 String classifier = library.getAsJsonObject("natives").get(osName()).getAsString()
@@ -221,16 +261,25 @@ public class MinecraftLauncher {
                 if (!downloads.has("classifiers") || !downloads.getAsJsonObject("classifiers").has(classifier))
                     throw new IOException("Native library missing for " + osName() + ": " + library.get("name").getAsString());
                 JsonObject nativeArtifact = downloads.getAsJsonObject("classifiers").getAsJsonObject(classifier);
-                Path jar = download(nativeArtifact, LauncherFiles.child(cacheRoot.resolve("libraries"), nativeArtifact.get("path").getAsString()), progress);
+                Path jar = LauncherFiles.child(cacheRoot.resolve("libraries"), nativeArtifact.get("path").getAsString());
+                tasks.add(() -> { download(nativeArtifact, jar, progress); return null; });
                 List<String> exclusions = new ArrayList<>(); exclusions.add("META-INF/");
                 if (library.has("extract") && library.getAsJsonObject("extract").has("exclude"))
                     for (JsonElement exclude : library.getAsJsonObject("extract").getAsJsonArray("exclude")) exclusions.add(exclude.getAsString());
-                extractNatives(jar, natives, exclusions);
+                extraction.add(() -> { extractNatives(jar, natives, exclusions); return null; });
             }
         }
         return classpath;
     }
-    private String assets(JsonObject metadata, Path assets, Path gameDir, Consumer<String> progress) throws IOException {
+    String assets(JsonObject metadata, Path assets, Path gameDir, Consumer<String> progress) throws IOException {
+        Consumer<String> log = ParallelDownloads.serialized(progress);
+        List<Callable<Void>> tasks = new ArrayList<>();
+        String id = planAssets(metadata, assets, gameDir, tasks, log);
+        ParallelDownloads.run("Minecraft assets", tasks, log);
+        return id;
+    }
+    private String planAssets(JsonObject metadata, Path assets, Path gameDir, List<Callable<Void>> tasks,
+                              Consumer<String> progress) throws IOException {
         if (!metadata.has("assetIndex")) return string(metadata, "assets", "legacy");
         JsonObject descriptor = metadata.getAsJsonObject("assetIndex");
         String id = descriptor.get("id").getAsString();
@@ -239,38 +288,20 @@ public class MinecraftLauncher {
         JsonObject data = LauncherFiles.readJson(index);
         boolean virtual = data.has("virtual") && data.get("virtual").getAsBoolean();
         boolean resources = data.has("map_to_resources") && data.get("map_to_resources").getAsBoolean();
-        int total = data.getAsJsonObject("objects").size();
-        java.util.concurrent.ExecutorService executor = java.util.concurrent.Executors.newFixedThreadPool(8, task -> {
-            Thread thread = new Thread(task, "Minecraft asset download"); thread.setDaemon(true); return thread;
-        });
-        java.util.concurrent.CompletionService<Void> completion = new java.util.concurrent.ExecutorCompletionService<>(executor);
-        List<java.util.concurrent.Future<Void>> downloads = new ArrayList<>();
-        try {
-            for (Map.Entry<String, JsonElement> entry : data.getAsJsonObject("objects").entrySet()) {
-                downloads.add(completion.submit(() -> {
-                    JsonObject object = entry.getValue().getAsJsonObject();
-                    String hash = object.get("hash").getAsString();
-                    if (!hash.matches("[0-9a-fA-F]{40}")) throw new IOException("Invalid asset hash.");
-                    String relative = hash.substring(0, 2) + "/" + hash;
-                    Path artifact = LauncherFiles.download("https://resources.download.minecraft.net/" + relative,
-                            LauncherFiles.child(assets.resolve("objects"), relative), hash, object.get("size").getAsLong(), ignored -> { });
-                    if (virtual) linkOrCopy(artifact, LauncherFiles.child(assets.resolve("virtual").resolve(safeId(id)), entry.getKey()));
-                    if (resources) linkOrCopy(artifact, LauncherFiles.child(gameDir.resolve("resources"), entry.getKey()));
-                    return null;
-                }));
-            }
-            for (int done = 1; done <= total; done++) {
-                completion.take().get();
-                if (done % 100 == 0 || done == total) progress.accept("Minecraft assets: " + done + "/" + total);
-            }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt(); throw new java.io.InterruptedIOException("Minecraft preparation cancelled.");
-        } catch (java.util.concurrent.ExecutionException e) {
-            if (e.getCause() instanceof IOException) throw (IOException) e.getCause();
-            throw new IOException("Minecraft asset preparation failed.", e.getCause());
-        } finally {
-            for (java.util.concurrent.Future<Void> task : downloads) if (!task.isDone()) task.cancel(true);
-            executor.shutdownNow();
+        for (Map.Entry<String, JsonElement> entry : data.getAsJsonObject("objects").entrySet()) {
+            JsonObject object = entry.getValue().getAsJsonObject();
+            String hash = object.get("hash").getAsString();
+            if (!hash.matches("[0-9a-fA-F]{40}")) throw new IOException("Invalid asset hash.");
+            String relative = hash.substring(0, 2) + "/" + hash;
+            Path destination = LauncherFiles.child(assets.resolve("objects"), relative);
+            Path virtualTarget = virtual ? LauncherFiles.child(assets.resolve("virtual").resolve(safeId(id)), entry.getKey()) : null;
+            Path resourceTarget = resources ? LauncherFiles.child(gameDir.resolve("resources"), entry.getKey()) : null;
+            tasks.add(() -> {
+                Path artifact = LauncherFiles.download(assetBaseUrl + relative, destination, hash, object.get("size").getAsLong(), progress);
+                if (virtualTarget != null) linkOrCopy(artifact, virtualTarget);
+                if (resourceTarget != null) linkOrCopy(artifact, resourceTarget);
+                return null;
+            });
         }
         return id;
     }
@@ -357,6 +388,7 @@ public class MinecraftLauncher {
         if (request.serverHost != null && !quickPlay) {
             args.add("--server"); args.add(request.serverHost); args.add("--port"); args.add(Integer.toString(request.serverPort));
         }
+        if (request.fullscreen && !args.contains("--fullscreen")) args.add("--fullscreen");
         return args;
     }
     private static boolean supportsQuickPlay(JsonObject metadata, String placeholder) {

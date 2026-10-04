@@ -61,6 +61,20 @@ class WorldServiceTest {
         }
     }
 
+    @Test void moddedClientCanJoinVanillaWorldButNonVanillaLoadersMustMatch() throws Exception {
+        Fixture fixture = fixture(true);
+        Profile server = fixture.profiles.get(fixture.world.serverProfileId);
+        server.type = ProfileType.MODS_SERVER; server.loader = "FORGE"; fixture.profiles.save(server);
+        Profile client = fixture.profiles.get(fixture.world.clientProfileId);
+        client.loader = "FABRIC"; fixture.profiles.save(client);
+        try (WorldService service = service(fixture, port -> { throw new AssertionError("No sharing"); }, fixtureInstaller(), realProbe(), Duration.ofSeconds(10))) {
+            assertThrows(IllegalArgumentException.class, () -> service.launch(fixture.world.id, false));
+            server.loader = "VANILLA"; fixture.profiles.save(server);
+            WorldSession session = service.launch(fixture.world.id, false);
+            assertTrue(session.server().isAlive());
+        }
+    }
+
     @Test void timeoutStopsTheRealChildAndDoesNotLaunchClient() throws Exception {
         Fixture fixture = fixture(true);
         AtomicReference<Process> server = new AtomicReference<>();

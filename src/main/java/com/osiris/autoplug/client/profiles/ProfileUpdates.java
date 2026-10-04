@@ -198,7 +198,7 @@ public class ProfileUpdates {
             default: return List.of(profile.loader.toLowerCase(Locale.ROOT));
         }
     }
-    private void verify(SearchResult result, Path path) throws Exception {
+    static void verify(SearchResult result, Path path) throws Exception {
         if (!Files.isRegularFile(path) || Files.size(path) == 0) throw new IOException("Downloaded artifact is empty");
         if (result.fileSize >= 0 && Files.size(path) != result.fileSize) throw new IOException("Downloaded artifact size mismatch");
         String expected = result.sha512 != null ? result.sha512 : result.sha1;
@@ -209,5 +209,9 @@ public class ProfileUpdates {
             if (!expected.equalsIgnoreCase(actual.toString())) throw new IOException("Downloaded artifact checksum mismatch");
         }
         try (ZipFile jar = new ZipFile(path.toFile())) { if (!jar.entries().hasMoreElements()) throw new IOException("Downloaded JAR is empty"); }
+    }
+    /** Shared provider download and artifact verification for first-install recipes. */
+    void downloadVerified(SearchResult result, Path destination) throws Exception {
+        downloader.download(result, destination); verify(result, destination);
     }
 }

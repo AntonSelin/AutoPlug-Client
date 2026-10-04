@@ -26,9 +26,17 @@ public interface LauncherActions {
     default WorldInfo createWorld(String name, String serverProfileId, String clientProfileId) throws Exception { throw unavailable(); }
     default void setWorldEulaAccepted(String id, boolean accepted) throws Exception { throw unavailable(); }
     default void launchWorld(String id, boolean share) throws Exception { throw unavailable(); }
+    default void launchWorld(String id, boolean share, String profileId) throws Exception { launchWorld(id, share); }
     /** Starts an existing singleplayer save and returns the backend's launch status. */
     default String launchLocalWorld(String id, String version) throws Exception { throw unavailable(); }
+    default String launchLocalWorld(String id, String version, String profileId) throws Exception { return launchLocalWorld(id, version); }
+    default String preferredProfile(String target) throws Exception { return ""; }
+    default void rememberProfile(String target, String profileId) throws Exception { }
     default String shareWorld(String id) throws Exception { throw unavailable(); }
+    default String serverLog(String id) throws Exception { return "Start this managed world to view its AutoPlug console."; }
+    default void serverCommand(String id, String command) throws Exception { throw unavailable(); }
+    default void stopWorld(String id) throws Exception { throw unavailable(); }
+    default void restartWorld(String id) throws Exception { throw unavailable(); }
     default void launchProfile(String profileId, String host, int port) throws Exception { throw unavailable(); }
     default SettingsInfo settings() throws Exception { return new SettingsInfo(); }
     default void saveSettings(SettingsInfo settings) throws Exception { throw unavailable(); }
@@ -89,5 +97,6 @@ public interface LauncherActions {
         public int port = 25565;
         public boolean upnp = true;
         public boolean rememberAccount = false;
+        public boolean fullscreen = true;
     }
 }

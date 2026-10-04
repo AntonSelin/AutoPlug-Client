@@ -55,6 +55,7 @@ public class MineStat {
      * Minecraft version the server is running
      */
     private String version;
+    private String favicon;
     private int protocol = -1;
     /**
      * Current number of players on the server
@@ -202,6 +203,7 @@ public class MineStat {
     }
 
     public int getProtocol() { return protocol; }
+    public String getFavicon() { return favicon; }
 
     public String getVersion() {
         return version;
@@ -526,6 +528,7 @@ public class MineStat {
     public Retval jsonRequest(String address, int port, int timeout) {
         serverUp = false;
         protocol = -1;
+        favicon = null;
         try (Socket clientSocket = new Socket()) {
             long startTime = System.currentTimeMillis();
             clientSocket.connect(new InetSocketAddress(address, port), timeout);
@@ -566,6 +569,8 @@ public class MineStat {
             protocol = jobj.get("version").getAsJsonObject().get("protocol").getAsInt();
             setCurrentPlayers(jobj.get("players").getAsJsonObject().get("online").getAsInt());
             setMaximumPlayers(jobj.get("players").getAsJsonObject().get("max").getAsInt());
+            JsonElement icon = jobj.get("favicon");
+            if (icon != null && icon.isJsonPrimitive() && icon.getAsJsonPrimitive().isString()) favicon = icon.getAsString();
             setRequestType("SLP 1.7 (JSON)");
             if (!isDataValid())
                 return Retval.UNKNOWN;

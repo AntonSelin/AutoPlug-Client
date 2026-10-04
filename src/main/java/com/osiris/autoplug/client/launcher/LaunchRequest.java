@@ -15,6 +15,7 @@ public final class LaunchRequest {
     public final String serverHost;
     public final int serverPort;
     public final String singleplayerWorld;
+    public final boolean fullscreen;
 
     public LaunchRequest(Path gameDir, String version, String loader, String loaderVersion,
                          MinecraftAccount account, String serverHost, int serverPort) {
@@ -23,6 +24,16 @@ public final class LaunchRequest {
 
     public LaunchRequest(Path gameDir, String version, String loader, String loaderVersion,
                          MinecraftAccount account, String serverHost, int serverPort, String singleplayerWorld) {
+        this(gameDir, version, loader, loaderVersion, account, serverHost, serverPort, singleplayerWorld, true);
+    }
+
+    public LaunchRequest(Path gameDir, String version, String loader, String loaderVersion,
+                         MinecraftAccount account, String serverHost, int serverPort, boolean fullscreen) {
+        this(gameDir, version, loader, loaderVersion, account, serverHost, serverPort, null, fullscreen);
+    }
+
+    public LaunchRequest(Path gameDir, String version, String loader, String loaderVersion,
+                         MinecraftAccount account, String serverHost, int serverPort, String singleplayerWorld, boolean fullscreen) {
         this.gameDir = Objects.requireNonNull(gameDir, "gameDir").toAbsolutePath().normalize();
         this.version = safeVersion(version);
         this.loader = loader == null ? "VANILLA" : loader.toUpperCase(Locale.ROOT);
@@ -43,6 +54,7 @@ public final class LaunchRequest {
         if (singleplayerWorld != null && this.serverHost != null)
             throw new IllegalArgumentException("Choose either a local world or a multiplayer server.");
         this.singleplayerWorld = singleplayerWorld;
+        this.fullscreen = fullscreen;
     }
 
     static String safeVersion(String value) {

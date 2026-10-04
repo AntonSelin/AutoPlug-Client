@@ -160,13 +160,18 @@ class LocalWorldStoreTest {
         try (LauncherServices services = new LauncherServices(temporary.resolve("autoplug"), minecraft, ignored -> { })) {
             LauncherActions.ProfileInfo server = services.createProfile("Server", "1.21.1", "VANILLA", "MODS_SERVER", false);
             LauncherActions.ProfileInfo client = services.createProfile("Client", "1.21.1", "VANILLA", "MODS", false);
-            services.createWorld("Managed", server.id, client.id);
+            LauncherActions.WorldInfo created = services.createWorld("Managed", server.id, client.id);
+            WorldStore store = new WorldStore(temporary.resolve("autoplug/worlds"));
+            VirtualWorld managed = store.get(created.id);
+            managed.createdAt = System.currentTimeMillis() + 60_000; store.save(managed);
             List<LauncherActions.WorldInfo> worlds = services.worlds();
             assertEquals(2, worlds.size());
-            assertTrue(worlds.get(0).local); assertEquals("1.21.1", worlds.get(0).gameVersion);
-            assertEquals(original.toString(), worlds.get(0).directory);
-            assertFalse(worlds.get(1).local);
-            assertThrows(IOException.class, () -> services.launchLocalWorld(worlds.get(0).id, "1.21.2"));
+            assertEquals(created.id, worlds.get(0).id, "The most recently created world leads the combined list");
+            assertFalse(worlds.get(0).local); assertFalse(store.get(created.id).eulaAccepted);
+            LauncherActions.WorldInfo local = worlds.stream().filter(world -> world.id.equals("local:Local")).findFirst().orElseThrow(AssertionError::new);
+            assertTrue(local.local); assertEquals("1.21.1", local.gameVersion);
+            assertEquals(original.toString(), local.directory);
+            assertThrows(IOException.class, () -> services.launchLocalWorld(local.id, "1.21.2"));
         }
         assertArrayEquals(before, Files.readAllBytes(original.resolve("level.dat")));
         assertFalse(Files.exists(minecraft.resolve(".autoplug")));

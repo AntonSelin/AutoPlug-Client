@@ -9,6 +9,9 @@ public class Profile {
     public boolean template;
     public boolean migrationPending;
     public String migrationSummary = "";
+    /** A bundled recipe is installed once; later user edits are never re-seeded. */
+    public String builtinPreset;
+    public boolean builtinPresetInstalled;
     private transient Path directory;
 
     public String getId() { return id; }

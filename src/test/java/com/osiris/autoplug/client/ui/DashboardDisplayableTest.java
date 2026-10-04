@@ -56,7 +56,7 @@ class DashboardDisplayableTest {
                     assertFalse(window.isVisible());
                     assertFalse(window.isShowing());
                 });
-                awaitUi(() -> !required(dashboard.get(), "activity-progress").isVisible()
+                awaitUi(() -> ((JProgressBar) required(dashboard.get(), "activity-progress")).getValue() == 100
                         && findNamed(dashboard.get(), "world-local:fixture-7") != null, events);
 
                 for (int width : new int[]{1200, 950, 1200, 950}) {
@@ -109,7 +109,7 @@ class DashboardDisplayableTest {
                             textFields(required(dashboard.get(), "advanced-runtime-fields")).get(0).getText()));
 
                     onEdt(() -> button(dashboard.get(), "Worlds").doClick());
-                    awaitUi(() -> !required(dashboard.get(), "activity-progress").isVisible(), events);
+                    awaitUi(() -> ((JProgressBar) required(dashboard.get(), "activity-progress")).getValue() == 100, events);
                     settle(frame.get(), events);
                     onEdt(() -> verifyWorlds(dashboard.get(), frame.get()));
                     events.assertClean();

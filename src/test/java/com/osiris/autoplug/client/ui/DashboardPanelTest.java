@@ -29,6 +29,42 @@ import static org.junit.jupiter.api.Assertions.*;
 class DashboardPanelTest {
     @TempDir Path directory;
 
+    @Test void firstLaunchUtilitySummaryAndActionsFitCompactProfilesPage() throws Exception {
+        String summary = "Client utility mods install on first launch: Fabric API, Sodium, Entity Culling, ImmediatelyFast and Mod Menu, with required libraries. Exact-version availability is checked before launch.";
+        ProfileInfo profile = new ProfileInfo("fabric", "Default (FABRIC)", "1.21.1", "FABRIC", "MODS", directory.toString(), false, summary, true);
+        LauncherActions actions = new LauncherActions() { @Override public List<ProfileInfo> profiles() { return Collections.singletonList(profile); } };
+        AtomicReference<DashboardPanel> panel = new AtomicReference<>();
+        SwingUtilities.invokeAndWait(() -> { FlatLightLaf.setup(); panel.set(new DashboardPanel(actions,
+                new ServerBrowserService(directory.resolve("servers.json"), directory.resolve("servers.dat")), false)); });
+        try {
+            awaitUi(() -> ((JProgressBar)findNamed(panel.get(), "activity-progress")).getValue() == 100);
+            SwingUtilities.invokeAndWait(() -> {
+                findButton(panel.get(), "Profiles").doClick(0);
+                ((JTable)findNamed(panel.get(), "profile-table")).setRowSelectionInterval(0, 0);
+            });
+            awaitUi(() -> ((JTextArea)findNamed(panel.get(), "profile-details")).getText().contains("No mods added yet."));
+            SwingUtilities.invokeAndWait(() -> {
+                panel.get().setSize(950, 620); for (int i = 0; i < 8; i++) layout(panel.get());
+                JTextArea details = (JTextArea)findNamed(panel.get(), "profile-details");
+                assertEquals(0, details.getCaretPosition(), "The background empty-collection note must not hide the beginning");
+                assertTrue(details.getText().contains(summary)); assertTrue(details.getText().contains("Ready to launch"));
+                JViewport viewport = (JViewport)SwingUtilities.getAncestorOfClass(JViewport.class, details);
+                try {
+                    Rectangle first = details.modelToView(0), last = details.modelToView(details.getDocument().getLength());
+                    assertTrue(viewport.getViewRect().contains(first), "Directory and readiness remain visible");
+                    assertTrue(viewport.getViewRect().contains(last), "The complete first-launch summary and empty-collection note fit");
+                } catch (javax.swing.text.BadLocationException e) { throw new AssertionError(e); }
+                assertTrue(findNamed(panel.get(), "profile-table").getHeight() >= 100, "Profile list remains useful");
+                for (String label : new String[]{"Launch client", "Add JAR", "Modrinth", "CurseForge", "AutoPlug mods"}) {
+                    AbstractButton action = findButton(panel.get(), label);
+                    Rectangle bounds = SwingUtilities.convertRectangle(action.getParent(), action.getBounds(), panel.get());
+                    assertTrue(bounds.x >= 0 && bounds.y >= 0 && bounds.width > 0 && bounds.height > 0
+                            && bounds.x + bounds.width <= 950 && bounds.y + bounds.height <= 620, label + " stays visible");
+                }
+            });
+        } finally { SwingUtilities.invokeAndWait(() -> panel.get().close()); }
+    }
+
     @Test void progressKeepsLiveStepThroughOtherRefreshAndReleasesSubscriptions() throws Exception {
         AtomicReference<Consumer<String>> listener = new AtomicReference<>();
         AtomicReference<Consumer<Integer>> measured = new AtomicReference<>();
@@ -43,27 +79,33 @@ class DashboardPanelTest {
         AtomicReference<DashboardPanel> panel = new AtomicReference<>();
         SwingUtilities.invokeAndWait(() -> panel.set(new DashboardPanel(actions, new ServerBrowserService(directory.resolve("servers.json"), directory.resolve("servers.dat")), false)));
         try {
-            awaitUi(() -> !findNamed(panel.get(), "activity-progress").isVisible());
+            awaitUi(() -> ((JProgressBar) findNamed(panel.get(), "activity-progress")).getValue() == 100);
             SwingUtilities.invokeAndWait(() -> panel.get().importArtifact(new ProfileInfo("test", "Test", "1.21.1", "VANILLA", "MODS", "", false), "example.jar", ""));
             assertTrue(started.await(4, TimeUnit.SECONDS));
             listener.get().accept("Resolving libraries https://example.invalid/library.jar");
             awaitUi(() -> containsText(panel.get(), "Resolving libraries"));
             SwingUtilities.invokeAndWait(() -> {
-                assertTrue(((JProgressBar) findNamed(panel.get(), "activity-progress")).isIndeterminate());
+                assertFalse(((JProgressBar) findNamed(panel.get(), "activity-progress")).isIndeterminate());
+                assertTrue(((JProgressBar) findNamed(panel.get(), "activity-progress")).getValue() < 100);
                 assertEquals("https://example.invalid/library.jar", ((JTextField) findNamed(panel.get(), "download-source")).getText());
                 findButton(panel.get(), "Reload").doClick();
             });
             awaitUi(() -> containsText(panel.get(), "Account 2"));
             SwingUtilities.invokeAndWait(() -> assertTrue(containsText(panel.get(), "Resolving libraries")));
             measured.get().accept(37);
-            awaitUi(() -> ((JProgressBar) findNamed(panel.get(), "activity-progress")).getValue() == 37);
+            awaitUi(() -> ((JProgressBar) findNamed(panel.get(), "activity-progress")).getToolTipText().contains("Current step: 37%"));
+            AtomicInteger beforeRefresh = new AtomicInteger();
             SwingUtilities.invokeAndWait(() -> {
                 assertFalse(((JProgressBar) findNamed(panel.get(), "activity-progress")).isIndeterminate());
+                beforeRefresh.set(((JProgressBar) findNamed(panel.get(), "activity-progress")).getValue());
                 findButton(panel.get(), "Reload").doClick();
             });
             awaitUi(() -> containsText(panel.get(), "Account 3"));
-            SwingUtilities.invokeAndWait(() -> assertFalse(((JProgressBar) findNamed(panel.get(), "activity-progress")).isIndeterminate()));
-            release.countDown(); awaitUi(() -> !findNamed(panel.get(), "activity-progress").isVisible());
+            SwingUtilities.invokeAndWait(() -> {
+                JProgressBar bar = (JProgressBar) findNamed(panel.get(), "activity-progress");
+                assertFalse(bar.isIndeterminate()); assertTrue(bar.getValue() >= beforeRefresh.get()); assertTrue(bar.getValue() < 100);
+            });
+            release.countDown(); awaitUi(() -> ((JProgressBar) findNamed(panel.get(), "activity-progress")).getValue() == 100);
             Consumer<String> stale = listener.get();
             SwingUtilities.invokeAndWait(() -> panel.get().close()); assertNull(listener.get()); assertNull(measured.get());
             stale.accept("Should not appear");
@@ -75,7 +117,7 @@ class DashboardPanelTest {
         AtomicReference<DashboardPanel> panel = new AtomicReference<>();
         SwingUtilities.invokeAndWait(() -> panel.set(new DashboardPanel(new LauncherActions() {}, new ServerBrowserService(directory.resolve("servers.json"), directory.resolve("servers.dat")), false)));
         try {
-            awaitUi(() -> !findNamed(panel.get(), "activity-progress").isVisible());
+            awaitUi(() -> ((JProgressBar) findNamed(panel.get(), "activity-progress")).getValue() == 100);
             SwingUtilities.invokeAndWait(() -> {
                 for (String view : new String[]{"Server Browser", "Worlds", "Profiles", "Server Manager", "Settings"}) {
                     findButton(panel.get(), view).doClick();
@@ -105,7 +147,7 @@ class DashboardPanelTest {
         AtomicReference<DashboardPanel> panel = new AtomicReference<>();
         SwingUtilities.invokeAndWait(() -> panel.set(new DashboardPanel(new LauncherActions() {}, new ServerBrowserService(directory.resolve("servers.json"), directory.resolve("servers.dat")), false)));
         try {
-            awaitUi(() -> !findNamed(panel.get(), "activity-progress").isVisible());
+            awaitUi(() -> ((JProgressBar) findNamed(panel.get(), "activity-progress")).getValue() == 100);
             SwingUtilities.invokeAndWait(() -> {
                 findButton(panel.get(), "Settings").doClick();
                 findButton(panel.get(), "Advanced").doClick();
@@ -151,9 +193,10 @@ class DashboardPanelTest {
         SavedServer first = new SavedServer("Same name", "first.example.invalid:25566"), second = new SavedServer("Same name", "second.example.invalid:25567");
         Map<String, ServerStatus> statuses = new LinkedHashMap<>(); statuses.put(first.address, onlineStatus("First", "1.21.1")); statuses.put(second.address, onlineStatus("Second", "1.21.1"));
         AtomicReference<DashboardPanel> panel = new AtomicReference<>();
-        SwingUtilities.invokeAndWait(() -> panel.set(new DashboardPanel(actions, new ServerBrowserService(directory.resolve("servers.json"), directory.resolve("servers.dat")), false)));
+        SwingUtilities.invokeAndWait(() -> panel.set(new DashboardPanel(actions, new ServerBrowserService(directory.resolve("servers.json"), directory.resolve("servers.dat")), false,
+                choices -> ((AbstractButton)findNamed(choices, "launch-choice-ready")).doClick())));
         try {
-            awaitUi(() -> !findNamed(panel.get(), "activity-progress").isVisible());
+            awaitUi(() -> ((JProgressBar) findNamed(panel.get(), "activity-progress")).getValue() == 100);
             SwingUtilities.invokeAndWait(() -> {
                 panel.get().displayServers(Arrays.asList(first, second), statuses);
                 findButton(findNamed(panel.get(), "server-" + first.address), "Join").doClick();
@@ -178,9 +221,10 @@ class DashboardPanelTest {
         };
         SavedServer first = new SavedServer("First", "first.example.invalid"), removed = new SavedServer("Removed", "removed.example.invalid");
         AtomicReference<DashboardPanel> panel = new AtomicReference<>();
-        SwingUtilities.invokeAndWait(() -> panel.set(new DashboardPanel(actions, new ServerBrowserService(directory.resolve("servers.json"), directory.resolve("servers.dat")), false)));
+        SwingUtilities.invokeAndWait(() -> panel.set(new DashboardPanel(actions, new ServerBrowserService(directory.resolve("servers.json"), directory.resolve("servers.dat")), false,
+                choices -> ((AbstractButton)findNamed(choices, "launch-choice-older")).doClick())));
         try {
-            awaitUi(() -> !findNamed(panel.get(), "activity-progress").isVisible());
+            awaitUi(() -> ((JProgressBar) findNamed(panel.get(), "activity-progress")).getValue() == 100);
             SwingUtilities.invokeAndWait(() -> {
                 int oldGeneration = panel.get().displayServers(Arrays.asList(first, removed), Collections.emptyMap());
                 assertTrue(containsText(findNamed(panel.get(), "server-" + first.address), "Checking…"));
@@ -203,7 +247,7 @@ class DashboardPanelTest {
         AtomicReference<DashboardPanel> panel = new AtomicReference<>();
         SwingUtilities.invokeAndWait(() -> { FlatLightLaf.setup(); panel.set(new DashboardPanel(new LauncherActions() {}, new ServerBrowserService(directory.resolve("servers.json"), directory.resolve("servers.dat")), false)); });
         try {
-            awaitUi(() -> !findNamed(panel.get(), "activity-progress").isVisible());
+            awaitUi(() -> ((JProgressBar) findNamed(panel.get(), "activity-progress")).getValue() == 100);
             SwingUtilities.invokeAndWait(() -> {
                 SavedServer first = new SavedServer("<html><b>Literal 雪</b> — A very long Minecraft favorite name", "first.example.invalid"), second = new SavedServer("Other", "second.example.invalid");
                 Map<String, ServerStatus> statuses = new LinkedHashMap<>();
@@ -220,7 +264,7 @@ class DashboardPanelTest {
                     AbstractButton button = findAccessibleButton(firstCard, action); assertNotNull(button); assertNotNull(button.getIcon()); assertTrue(button.isFocusable());
                 }
                 panel.get().setSize(1200, 820); for (int i = 0; i < 5; i++) layout(panel.get());
-                assertEquals(firstCard.getY(), secondCard.getY()); assertTrue(secondCard.getX() > firstCard.getX());
+                assertEquals(firstCard.getX(), secondCard.getX()); assertTrue(secondCard.getY() > firstCard.getY());
                 ((AbstractButton) findNamed(secondCard, "select-server-" + second.address)).doClick();
                 ((JComboBox<?>) findNamed(panel.get(), "server-sort")).setSelectedItem("Name");
                 assertTrue(((AbstractButton) findNamed(secondCard, "select-server-" + second.address)).isSelected());
@@ -246,16 +290,16 @@ class DashboardPanelTest {
         AtomicReference<DashboardPanel> panel = new AtomicReference<>();
         SwingUtilities.invokeAndWait(() -> panel.set(new DashboardPanel(new LauncherActions() {}, new ServerBrowserService(directory.resolve("servers.json"), directory.resolve("servers.dat")), false)));
         try {
-            awaitUi(() -> !findNamed(panel.get(), "activity-progress").isVisible());
+            awaitUi(() -> ((JProgressBar) findNamed(panel.get(), "activity-progress")).getValue() == 100);
             try (com.osiris.autoplug.client.launcher.DownloadProgress.Transfer first = com.osiris.autoplug.client.launcher.DownloadProgress.begin("First asset", "https://example.invalid/first.jar");
                  com.osiris.autoplug.client.launcher.DownloadProgress.Transfer second = com.osiris.autoplug.client.launcher.DownloadProgress.begin("Second asset", "https://example.invalid/second.jar")) {
                 first.complete(20, 20);
                 awaitUi(() -> containsText(panel.get(), "First asset — complete"));
                 SwingUtilities.invokeAndWait(() -> {
-                    JProgressBar bar = (JProgressBar) findNamed(panel.get(), "activity-progress"); assertTrue(bar.isVisible()); assertTrue(bar.isIndeterminate());
+                    JProgressBar bar = (JProgressBar) findNamed(panel.get(), "activity-progress"); assertTrue(bar.isVisible()); assertFalse(bar.isIndeterminate()); assertTrue(bar.getValue() < 100);
                 });
                 second.complete(30, 30);
-                awaitUi(() -> !findNamed(panel.get(), "activity-progress").isVisible());
+                awaitUi(() -> ((JProgressBar) findNamed(panel.get(), "activity-progress")).getValue() == 100);
                 SwingUtilities.invokeAndWait(() -> assertEquals("https://example.invalid/second.jar", ((JTextField) findNamed(panel.get(), "download-source")).getText()));
             }
         } finally { SwingUtilities.invokeAndWait(() -> panel.get().close()); }
@@ -315,21 +359,24 @@ class DashboardPanelTest {
     @Test void localWorldLaunchUsesRecordedVersionWithoutProfileEulaOrSharing() throws Exception {
         CountDownLatch launched = new CountDownLatch(1);
         AtomicReference<List<String>> request = new AtomicReference<>(); AtomicBoolean onEventThread = new AtomicBoolean();
-        String result = "Minecraft 1.12.2 started. Select Singleplayer, then Old cottage.";
+        String result = "Minecraft 1.12.2 started with automatic entry for Old cottage.";
+        ProfileInfo vanilla = new ProfileInfo("local-vanilla", "Vanilla", "1.12.2", "VANILLA", "MODS", "", false);
         LauncherActions actions = new LauncherActions() {
             @Override public List<WorldInfo> worlds() {
                 return Arrays.asList(new WorldInfo("local:cottage", "Old cottage", "", "", directory.toString(), "", false, true, "1.12.2"));
             }
             @Override public List<ProfileInfo> profiles() {
-                return Arrays.asList(new ProfileInfo("newer-profile", "Different version", "1.21.1", "FABRIC", "MODS", "", false));
+                return Arrays.asList(new ProfileInfo("newer-profile", "Different version", "1.21.1", "FABRIC", "MODS", "", false), vanilla);
             }
+            @Override public ProfileInfo ensureDefaultProfiles(String version) { assertEquals("1.12.2", version); return vanilla; }
             @Override public String launchLocalWorld(String id, String version) {
                 onEventThread.set(SwingUtilities.isEventDispatchThread()); request.set(Arrays.asList(id, version)); launched.countDown(); return result;
             }
             @Override public void launchWorld(String id, boolean share) { fail("A local save must not start a managed server"); }
         };
         AtomicReference<DashboardPanel> panel = new AtomicReference<>();
-        SwingUtilities.invokeAndWait(() -> panel.set(new DashboardPanel(actions, new ServerBrowserService(directory.resolve("servers.json"), directory.resolve("servers.dat")), false)));
+        SwingUtilities.invokeAndWait(() -> panel.set(new DashboardPanel(actions, new ServerBrowserService(directory.resolve("servers.json"), directory.resolve("servers.dat")), false,
+                choices -> ((AbstractButton)findNamed(choices, "launch-choice-local-vanilla")).doClick())));
         try {
             awaitUi(() -> findNamed(panel.get(), "world-local:cottage") != null);
             SwingUtilities.invokeAndWait(() -> {
@@ -346,16 +393,20 @@ class DashboardPanelTest {
 
     @Test void unknownLocalVersionIsVisibleAndManagedWorldKeepsItsOwnControls() throws Exception {
         CountDownLatch managedLaunch = new CountDownLatch(1);
+        ProfileInfo client = new ProfileInfo("client", "Client", "1.21.1", "VANILLA", "MODS", "", false);
         LauncherActions actions = new LauncherActions() {
             @Override public List<WorldInfo> worlds() {
                 return Arrays.asList(new WorldInfo("local:old", "Old save", "", "", directory.toString(), "", false, true, ""),
-                        new WorldInfo("managed", "Friends", "server", "client", directory.toString(), "", false));
+                        new WorldInfo("managed", "Friends", "server", "client", directory.toString(), "", false, false, "1.21.1"));
             }
+            @Override public List<ProfileInfo> profiles() { return Arrays.asList(client); }
+            @Override public ProfileInfo ensureDefaultProfiles(String version) { return client; }
             @Override public void launchWorld(String id, boolean share) { assertEquals("managed", id); assertFalse(share); managedLaunch.countDown(); }
             @Override public String launchLocalWorld(String id, String version) { fail("Managed play must not launch a local save"); return ""; }
         };
         AtomicReference<DashboardPanel> panel = new AtomicReference<>();
-        SwingUtilities.invokeAndWait(() -> panel.set(new DashboardPanel(actions, new ServerBrowserService(directory.resolve("servers.json"), directory.resolve("servers.dat")), false)));
+        SwingUtilities.invokeAndWait(() -> panel.set(new DashboardPanel(actions, new ServerBrowserService(directory.resolve("servers.json"), directory.resolve("servers.dat")), false,
+                choices -> ((AbstractButton)findNamed(choices, "launch-choice-client")).doClick())));
         try {
             awaitUi(() -> findNamed(panel.get(), "world-managed") != null);
             SwingUtilities.invokeAndWait(() -> {
@@ -426,7 +477,7 @@ class DashboardPanelTest {
         });
         calls.await(4, TimeUnit.SECONDS);
         // The empty local import finishes before injecting render-only examples; no server is pinged.
-        awaitUi(() -> !findNamed(panel.get(), "activity-progress").isVisible());
+        awaitUi(() -> ((JProgressBar) findNamed(panel.get(), "activity-progress")).getValue() == 100);
         SwingUtilities.invokeAndWait(() -> {
             SavedServer online = new SavedServer("Quiet Cove", "cove.example.invalid"), unavailable = new SavedServer("Skyline Survival", "skyline.example.invalid:25566"), checking = new SavedServer("Weekend Adventure", "weekend.example.invalid");
             Map<String, ServerStatus> statuses = new LinkedHashMap<>();

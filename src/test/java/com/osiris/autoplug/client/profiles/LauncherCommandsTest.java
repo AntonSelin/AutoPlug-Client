@@ -36,7 +36,7 @@ class LauncherCommandsTest {
             assertTrue(services.getProfiles().get(id).template);
             LauncherCommands commands = new LauncherCommands(services, output::add);
             commands.execute(commands.tokenize(".profiles clone " + id + " 1.20.1 --name Downgrade --yes"));
-            assertEquals(4, services.profiles().size()); // Two version-matched defaults plus the user's source and clone.
+            assertEquals(5, services.profiles().size()); // Three version-matched defaults plus the user's source and clone.
             assertTrue(services.profiles().stream().anyMatch(p -> p.name.equals("Downgrade") && p.launchable));
         }
     }

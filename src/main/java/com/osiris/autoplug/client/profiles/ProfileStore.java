@@ -55,6 +55,18 @@ public class ProfileStore {
     public void save(Profile p) throws IOException {
         validate(p); p.setDirectory(directory(p.id)); json.write(p.getDirectory().resolve("profile.json"), p);
     }
+    /** Creates metadata offline. The complete compatible utility pack is prepared on first launch. */
+    public Profile ensureFabricDefault(String version) throws IOException {
+        try (ProfileLease ignored = new ProfileLease(root)) {
+            for (Profile profile : list()) if (FabricDefaultProfile.PRESET.equals(profile.builtinPreset)
+                    && version.equals(profile.gameVersion) && "FABRIC".equals(profile.loader)
+                    && profile.type == ProfileType.MODS && !profile.template && !profile.migrationPending) return profile;
+            Profile profile = create("Default (FABRIC)", version, "FABRIC", ProfileType.MODS);
+            profile.builtinPreset = FabricDefaultProfile.PRESET;
+            profile.migrationSummary = "Client utility mods install on first launch: Fabric API, Sodium, Entity Culling, ImmediatelyFast and Mod Menu, with required libraries. Exact-version availability is checked before launch.";
+            save(profile); return profile;
+        }
+    }
     public Profile cloneProfile(String sourceId, String targetVersion) throws IOException {
         Profile source = get(sourceId);
         return cloneProfile(sourceId, source.name + " " + targetVersion, targetVersion, source.loader);
@@ -64,6 +76,7 @@ public class ProfileStore {
         try (ProfileLease ignored = new ProfileLease(source.getDirectory())) {
             Profile target = create(name, version, loader, source.type);
             target.loaderVersion = Objects.equals(source.loader, target.loader) && Objects.equals(source.gameVersion, version) ? source.loaderVersion : null;
+            if ("FABRIC".equals(target.loader)) { target.builtinPreset = source.builtinPreset; target.builtinPresetInstalled = source.builtinPresetInstalled; }
             target.migrationPending = !Objects.equals(source.gameVersion, version) || !Objects.equals(source.loader, target.loader);
             Set<String> skip = new HashSet<>(Arrays.asList("profile.json", ".profile.lock", ".updates", ".autoplug", "logs", "crash-reports", "saves", "world", "versions", "libraries", "assets", "natives", "launcher_profiles.json", "accounts.json", "usercache.json"));
             Files.walkFileTree(source.getDirectory(), new SimpleFileVisitor<Path>() {

@@ -4,6 +4,7 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.osiris.autoplug.client.utils.UtilsCrypto;
 import okhttp3.OkHttpClient;
+import okhttp3.Call;
 import okhttp3.Request;
 import okhttp3.Response;
 
@@ -31,8 +32,10 @@ final class LauncherFiles {
         catch (RuntimeException e) { throw new IOException("Invalid JSON metadata from " + DownloadProgress.sourceUrl(url), e); }
     }
     static String text(String url) throws IOException {
+        Call call = HTTP.newCall(new Request.Builder().url(url).header("User-Agent", "AutoPlug/10 native-launcher").build());
         try (DownloadProgress.Transfer transfer = DownloadProgress.begin("Fetching metadata", url);
-             Response response = HTTP.newCall(new Request.Builder().url(url).header("User-Agent", "AutoPlug/10 native-launcher").build()).execute()) {
+             ParallelDownloads.TrackedCall tracked = ParallelDownloads.track(call);
+             Response response = call.execute()) {
             transfer.redirect(response.request().url().toString());
             if (!response.isSuccessful() || response.body() == null) throw new IOException("HTTP " + response.code() + " fetching " + DownloadProgress.sourceUrl(url));
             if (response.body().contentLength() > 32 * 1024 * 1024) throw new IOException("Metadata too large: " + DownloadProgress.sourceUrl(url));
@@ -80,6 +83,25 @@ final class LauncherFiles {
         }
     }
     private static Path downloadLocked(String url, Path destination, String sha1, long size, Consumer<String> progress) throws IOException {
+        for (int attempt = 1; ; attempt++) {
+            try { return downloadAttempt(url, destination, sha1, size, progress); }
+            catch (IOException failure) {
+                if (Thread.currentThread().isInterrupted() || failure instanceof java.io.InterruptedIOException
+                        && !(failure instanceof java.net.SocketTimeoutException)
+                        || failure instanceof java.nio.file.FileSystemException
+                        || failure instanceof HttpFailure && !((HttpFailure) failure).retryable()
+                        || attempt >= 3) throw failure;
+                if (progress != null) progress.accept("Retrying " + destination.getFileName() + " (" + (attempt + 1)
+                        + "/3) from " + DownloadProgress.sourceUrl(url));
+                try { Thread.sleep(attempt * 200L); }
+                catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new java.io.InterruptedIOException("Download cancelled.");
+                }
+            }
+        }
+    }
+    private static Path downloadAttempt(String url, Path destination, String sha1, long size, Consumer<String> progress) throws IOException {
         if (valid(destination, sha1, size)) return destination;
         if (Thread.currentThread().isInterrupted()) throw new java.io.InterruptedIOException("Download cancelled.");
         Files.createDirectories(destination.getParent());
@@ -89,9 +111,10 @@ final class LauncherFiles {
         long total = 0, expected = size;
         try (DownloadProgress.Transfer ignored = transfer) {
             if (progress != null) progress.accept(description + " from " + DownloadProgress.sourceUrl(url));
-            try (Response response = HTTP.newCall(new Request.Builder().url(url).header("User-Agent", "AutoPlug/10 native-launcher").build()).execute()) {
+            Call call = HTTP.newCall(new Request.Builder().url(url).header("User-Agent", "AutoPlug/10 native-launcher").build());
+            try (ParallelDownloads.TrackedCall tracked = ParallelDownloads.track(call); Response response = call.execute()) {
                 transfer.redirect(response.request().url().toString());
-                if (!response.isSuccessful() || response.body() == null) throw new IOException("HTTP " + response.code() + " fetching " + DownloadProgress.sourceUrl(url));
+                if (!response.isSuccessful() || response.body() == null) throw new HttpFailure(response.code(), url);
                 if (expected < 0) expected = response.body().contentLength();
                 try (InputStream in = response.body().byteStream(); OutputStream out = Files.newOutputStream(temporary)) {
                     byte[] buffer = new byte[65536];
@@ -106,9 +129,18 @@ final class LauncherFiles {
                 }
             }
             if (!valid(temporary, sha1, size)) throw new IOException("Checksum or length mismatch: " + destination.getFileName());
+            if (Thread.currentThread().isInterrupted()) throw new java.io.InterruptedIOException("Download cancelled.");
             move(temporary, destination);
             transfer.complete(total, expected);
             return destination;
         } finally { Files.deleteIfExists(temporary); }
+    }
+    private static final class HttpFailure extends IOException {
+        private final int status;
+        HttpFailure(int status, String url) {
+            super("HTTP " + status + " fetching " + DownloadProgress.sourceUrl(url));
+            this.status = status;
+        }
+        boolean retryable() { return status == 408 || status == 429 || status >= 500; }
     }
 }

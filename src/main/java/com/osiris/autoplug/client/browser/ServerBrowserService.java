@@ -29,7 +29,8 @@ public final class ServerBrowserService {
             JsonArray array = JsonParser.parseReader(reader).getAsJsonArray();
             for (JsonElement value : array) {
                 JsonObject entry = value.getAsJsonObject();
-                result.add(new SavedServer(entry.get("name").getAsString(), entry.get("address").getAsString()));
+                result.add(new SavedServer(entry.get("name").getAsString(), entry.get("address").getAsString(),
+                        entry.has("lastJoinedAt") && !entry.get("lastJoinedAt").isJsonNull() ? entry.get("lastJoinedAt").getAsLong() : 0));
             }
         } catch (RuntimeException e) { throw new IOException("Could not read server favorites. The original file was preserved.", e); }
         return result;
@@ -37,8 +38,25 @@ public final class ServerBrowserService {
     public synchronized void add(String name, String address) throws IOException {
         SavedServer added = new SavedServer(name, address);
         List<SavedServer> servers = list();
+        long lastJoined = 0;
+        for (SavedServer server : servers) if (server.address.equalsIgnoreCase(added.address)) lastJoined = Math.max(lastJoined, server.lastJoinedAt);
         servers.removeIf(server -> server.address.equalsIgnoreCase(added.address));
-        servers.add(added); save(servers);
+        servers.add(new SavedServer(added.name, added.address, lastJoined)); save(servers);
+    }
+    /** Record only after a client starts; a ping or selection must not reorder recent play. */
+    public synchronized void recordJoined(String address) throws IOException {
+        recordJoined(address, System.currentTimeMillis());
+    }
+    synchronized void recordJoined(String address, long at) throws IOException {
+        String canonical = ServerAddress.parse(address).toString();
+        List<SavedServer> servers = list(); boolean found = false;
+        for (int i = 0; i < servers.size(); i++) {
+            SavedServer server = servers.get(i);
+            if (server.address.equalsIgnoreCase(canonical)) {
+                servers.set(i, new SavedServer(server.name, server.address, Math.max(server.lastJoinedAt, at))); found = true;
+            }
+        }
+        if (found) save(servers); // A removed favorite must not be resurrected by a late launch callback.
     }
     public synchronized void remove(String address) throws IOException {
         List<SavedServer> servers = list(); servers.removeIf(s -> s.address.equalsIgnoreCase(address)); save(servers);
@@ -68,6 +86,6 @@ public final class ServerBrowserService {
         MineStat ping = new MineStat(address.host, address.port, 3, MineStat.Request.JSON);
         boolean online = ping.pingResult == MineStat.Retval.SUCCESS && ping.isServerUp();
         return new ServerStatus(online, ping.getStrippedMotd(), ping.getVersion(), ping.getCurrentPlayers(), ping.getMaximumPlayers(),
-                ping.getProtocol(), ping.getLatency(), ping.pingResult.name());
+                ping.getProtocol(), ping.getLatency(), ping.pingResult.name(), online ? ServerIcon.decode(ping.getFavicon()) : null);
     }
 }

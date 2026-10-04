@@ -24,6 +24,7 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
     // FlatLaf caches shared borders when the first controls are created.
     { DashboardTheme.installDefaults(); }
     private final LauncherActions actions;
+    private final Consumer<LaunchChoicePanel> launchChoicePresenter;
     private final ServerBrowserService browser;
     private final ExecutorService workers = Executors.newFixedThreadPool(4, runnable -> {
         Thread thread = new Thread(runnable, "AutoPlug-Dashboard"); thread.setDaemon(true); return thread;
@@ -32,39 +33,52 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
     private final AtomicInteger running = new AtomicInteger();
     private final CardLayout cards = new CardLayout();
     private final JPanel pages = new JPanel(cards);
+    private final Map<String, JToggleButton> navigationButtons = new LinkedHashMap<>();
+    private JTabbedPane serverTabs;
+    private ManagedWorldPanel managedWorldPanel;
     private final JLabel status = new JLabel("Ready");
     private final JLabel navigationTitle = new JLabel("Server Browser");
     private final JProgressBar progress = new JProgressBar(0, 100);
+    private final OverallProgress overall = new OverallProgress();
+    private final javax.swing.Timer progressClock = new javax.swing.Timer(400, e -> {
+        if (running.get() > 0 || this.activeDownloads > 0) progress.setValue(overall.tick());
+    });
+    private boolean operationFailed;
     private final JTextField sourceUrl = new JTextField();
     private final JTextArea activity = textArea(5);
     private final JLabel serverEmpty = new JLabel("Add a server or import Minecraft favorites to get started.", SwingConstants.CENTER);
     private final ServerGrid serverCards = new ServerGrid();
     private final JTextField serverSearch = new JTextField(18);
-    private final JComboBox<String> serverSort = new JComboBox<>(new String[]{"Favorite order", "Name", "Address", "Status", "MOTD", "Players", "Version", "Latency"});
-    private final JToggleButton reverseServerSort = new JToggleButton("Descending");
+    private final JComboBox<String> serverSort = new JComboBox<>(new String[]{"Last joined", "Favorite order", "Name", "Address", "Status", "MOTD", "Players", "Version", "Latency"});
+    private final JToggleButton reverseServerSort = new JToggleButton("Reverse order");
     private final Map<String, ServerCard> serverViews = new LinkedHashMap<>();
     private String selectedServerAddress;
     private final DefaultTableModel profileModel = model("Name", "Minecraft", "Loader", "Type", "Template", "Ready");
     private final JTable profileTable = table(profileModel);
     private final JPanel worldCards = new WorldList();
     private final Map<String, ServerStatus> serverStatuses = new HashMap<>();
+    private final Map<String, Long> serverPingRequests = new HashMap<>();
+    private long nextServerPingRequest;
     private List<SavedServer> servers = Collections.emptyList();
     private List<ProfileInfo> profiles = Collections.emptyList();
     private List<WorldInfo> worlds = Collections.emptyList();
     private int pingGeneration;
     private final JComboBox<String> typeFilter = new JComboBox<>(new String[]{"All profiles", "MODS", "PLUGINS", "MODS_SERVER"});
     private List<ProfileInfo> visibleProfiles = Collections.emptyList();
-    private final JTextArea profileDetails = textArea(3);
+    private final JTextArea profileDetails = textArea(6);
     private final JTextField java8 = new JTextField(), java17 = new JTextField(), java21 = new JTextField();
     private final JTextField extraJava = new JTextField(), clientId = new JTextField(), offlineName = new JTextField();
     private final JComboBox<ProfileInfo> defaultProfile = new JComboBox<>();
     private final JSpinner port = new JSpinner(new SpinnerNumberModel(25565, 1, 65535, 1));
     private final JCheckBox upnp = new JCheckBox("Use UPnP when I explicitly share a world");
     private final JCheckBox rememberAccount = new JCheckBox("Remember Microsoft account on this computer");
+    private final JCheckBox fullscreen = new JCheckBox("Launch Minecraft in fullscreen");
     private final JLabel account = new JLabel("Loading account…");
     private ServerConsolePanel console;
     private SettingsInfo loadedSettings;
     private JDialog signInDialog;
+    private JDialog launchDialog;
+    private LaunchChoicePanel launchChoices;
     private final AutoCloseable downloadSubscription;
     private int activeDownloads;
 
@@ -72,7 +86,11 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
 
     /** The legacy controls can be omitted for a standalone preview without initializing a server. */
     public DashboardPanel(LauncherActions actions, ServerBrowserService browser, boolean includeLegacyControls) {
+        this(actions, browser, includeLegacyControls, null);
+    }
+    DashboardPanel(LauncherActions actions, ServerBrowserService browser, boolean includeLegacyControls, Consumer<LaunchChoicePanel> launchChoicePresenter) {
         super(new BorderLayout(0, 0));
+        this.launchChoicePresenter = launchChoicePresenter;
         this.actions = Objects.requireNonNull(actions); this.browser = Objects.requireNonNull(browser);
         setBorder(new EmptyBorder(12, 12, 10, 12)); pages.setOpaque(false);
         setPreferredSize(new Dimension(1100, 720));
@@ -94,7 +112,8 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
             DashboardTheme.navigation(button);
             button.setPreferredSize(new Dimension(170, 43));
             button.setMaximumSize(new Dimension(Integer.MAX_VALUE, 43)); button.setAlignmentX(Component.LEFT_ALIGNMENT);
-            button.addActionListener(e -> { cards.show(pages, name); navigationTitle.setText(name); if (name.equals("Worlds")) refreshWorlds(); });
+            button.addActionListener(e -> { showPage(name); if (name.equals("Worlds")) refreshWorlds(); });
+            navigationButtons.put(name, button);
             group.add(button); navigation.add(button); navigation.add(Box.createVerticalStrut(8));
             if (i == 0) button.setSelected(true);
         }
@@ -103,8 +122,12 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
         add(navigation, BorderLayout.WEST); add(pages, BorderLayout.CENTER);
         JPanel statusBar = DashboardTheme.surface(new BorderLayout(10, 4), 8);
         status.putClientProperty("html.disable", Boolean.TRUE); status.setName("activity-step");
-        progress.setName("activity-progress"); progress.setPreferredSize(new Dimension(140, 10)); progress.setVisible(false);
-        JPanel step = DashboardTheme.transparent(new BorderLayout(10, 0)); step.add(status); step.add(progress, BorderLayout.EAST);
+        progress.setName("activity-progress"); progress.setPreferredSize(new Dimension(140, 34));
+        progress.setLayout(new BorderLayout()); progress.setStringPainted(false);
+        progress.setForeground(new Color(DashboardTheme.dark() ? 0x254B78 : 0xC9DEFF));
+        status.setBorder(new EmptyBorder(5, 10, 5, 10)); progress.add(status);
+        progress.setToolTipText("Overall progress is estimated until all steps finish; the activity details show measured downloads.");
+        JPanel step = DashboardTheme.transparent(new BorderLayout(10, 0)); step.add(progress);
         sourceUrl.setName("download-source"); sourceUrl.setEditable(false); sourceUrl.setVisible(false);
         sourceUrl.setToolTipText("Current download source — select and copy the full URL"); sourceUrl.getAccessibleContext().setAccessibleName("Download source URL");
         JButton details = iconButton("Activity details", "activity", () -> information("Activity & download sources", activity.getText()));
@@ -150,7 +173,18 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
         list.add(serverEmpty, BorderLayout.NORTH); list.add(DashboardTheme.scroll(serverCards)); content.add(list, BorderLayout.CENTER);
         JTextArea note = textArea(1); note.setText("Server details come from live pings. Join uses your local profiles and keeps version checks in place.");
         DashboardTheme.tint(note, false); content.add(note, BorderLayout.SOUTH);
-        page.add(content, BorderLayout.CENTER); return page;
+        serverTabs = new JTabbedPane(); serverTabs.setName("server-browser-tabs");
+        managedWorldPanel = new ManagedWorldPanel(actions, world -> launchManagedWorld(world, false), this::openFolder);
+        serverTabs.addTab("Favorites", content); serverTabs.addTab("Managed worlds & consoles", managedWorldPanel);
+        serverTabs.addChangeListener(e -> { if (serverTabs.getSelectedIndex() == 1) managedWorldPanel.refresh(); });
+        page.add(serverTabs, BorderLayout.CENTER); return page;
+    }
+    private void showPage(String name) {
+        cards.show(pages, name); navigationTitle.setText(name);
+        JToggleButton selected = navigationButtons.get(name); if (selected != null) selected.setSelected(true);
+    }
+    private void manageWorld(WorldInfo world) {
+        showPage("Server Browser"); serverTabs.setSelectedIndex(1); managedWorldPanel.select(world.id);
     }
 
     private void addServer() {
@@ -187,18 +221,20 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
     }
     private void pingSelected() {
         SavedServer selected = selectedServer(); if (selected == null) return;
-        serverStatuses.remove(selected.address); serverViews.get(selected.address).update(null);
-        int generation = pingGeneration;
-        run("Checking " + selected.name, () -> browser.ping(selected), ping -> showPing(generation, selected, ping));
+        int generation = pingGeneration; long request = beginServerPing(selected);
+        run("Checking " + selected.name, () -> browser.ping(selected), ping -> showPing(generation, selected, request, ping));
     }
     private void showServers(List<SavedServer> result) {
         displayServers(result, Collections.emptyMap());
         int generation = pingGeneration;
-        for (SavedServer server : servers) run("Checking " + server.name, () -> browser.ping(server), ping -> showPing(generation, server, ping));
+        for (SavedServer server : servers) {
+            long request = beginServerPing(server);
+            run("Checking " + server.name, () -> browser.ping(server), ping -> showPing(generation, server, request, ping));
+        }
     }
     /** Render a snapshot without network work; also used by deterministic preview fixtures. */
     int displayServers(List<SavedServer> result, Map<String, ServerStatus> statuses) {
-        ++pingGeneration; servers = new ArrayList<>(result); serverStatuses.clear(); serverStatuses.putAll(statuses);
+        ++pingGeneration; servers = new ArrayList<>(result); serverStatuses.clear(); serverStatuses.putAll(statuses); serverPingRequests.clear();
         serverCards.removeAll(); serverViews.clear();
         for (SavedServer server : servers) {
             ServerCard card = new ServerCard(server); serverViews.put(server.address, card); serverCards.add(card.panel);
@@ -208,9 +244,20 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
         return pingGeneration;
     }
     void showPing(int generation, SavedServer server, ServerStatus ping) {
-        if (generation != pingGeneration) return;
+        if (closed.get() || generation != pingGeneration) return;
         ServerCard card = serverViews.get(server.address); if (card == null) return;
         serverStatuses.put(server.address, ping); card.update(ping); arrangeServerCards();
+    }
+    /** Called on the EDT; a newer manual check supersedes an in-flight check of the same favorite. */
+    long beginServerPing(SavedServer server) {
+        long request = ++nextServerPingRequest; serverPingRequests.put(server.address, request);
+        serverStatuses.remove(server.address);
+        ServerCard card = serverViews.get(server.address); if (card != null) card.update(null);
+        return request;
+    }
+    void showPing(int generation, SavedServer server, long request, ServerStatus ping) {
+        if (!Objects.equals(serverPingRequests.get(server.address), request)) return;
+        showPing(generation, server, ping);
     }
     private SavedServer selectedServer() {
         ServerCard selected = serverViews.get(selectedServerAddress);
@@ -222,7 +269,8 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
         List<ServerCard> ordered = new ArrayList<>(serverViews.values());
         String sort = String.valueOf(serverSort.getSelectedItem());
         Comparator<ServerCard> order = (left, right) -> 0;
-        if ("Name".equals(sort)) order = Comparator.comparing(card -> card.server.name, String.CASE_INSENSITIVE_ORDER);
+        if ("Last joined".equals(sort)) order = Comparator.<ServerCard>comparingLong(card -> card.server.lastJoinedAt).reversed();
+        else if ("Name".equals(sort)) order = Comparator.comparing(card -> card.server.name, String.CASE_INSENSITIVE_ORDER);
         else if ("Address".equals(sort)) order = Comparator.comparing(card -> card.server.address, String.CASE_INSENSITIVE_ORDER);
         else if ("Status".equals(sort)) order = Comparator.comparing(card -> card.state.getText());
         else if ("MOTD".equals(sort)) order = Comparator.comparing(card -> card.message.getText(), String.CASE_INSENSITIVE_ORDER);
@@ -268,34 +316,41 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
     }
     private final class ServerCard {
         final SavedServer server;
-        final JPanel panel = DashboardTheme.surface(new BorderLayout(0, 12), 16);
+        final JPanel panel = DashboardTheme.surface(new BorderLayout(18, 8), 16);
         final JToggleButton select;
-        final JLabel state = DashboardTheme.badge("Checking…");
+        final JLabel state = serverStatusBadge();
+        final JLabel icon = new JLabel(DashboardTheme.serverIcon(), SwingConstants.CENTER);
         final JTextArea message = textArea(2);
         final JLabel players = serverDetail("Players: —", "players"), version = serverDetail("Version: —", "version"), latency = serverDetail("Latency: —", "ping");
         ServerCard(SavedServer server) {
             this.server = server; panel.setName("server-" + server.address);
             panel.getAccessibleContext().setAccessibleName("Favorite server " + server.name);
-            JPanel heading = DashboardTheme.transparent(new BorderLayout(10, 0));
-            JLabel icon = new JLabel(DashboardTheme.serverIcon()); icon.setToolTipText("Saved Minecraft server"); heading.add(icon, BorderLayout.WEST);
-            JPanel identity = DashboardTheme.transparent(new BorderLayout(0, 3));
+            JPanel thumbnail = DashboardTheme.transparent(new GridBagLayout());
+            icon.setName("server-icon"); icon.setPreferredSize(new Dimension(96, 96));
+            icon.setToolTipText("Server icon (shown when supplied by the server)");
+            icon.getAccessibleContext().setAccessibleName("Server icon for " + server.name);
+            thumbnail.add(icon); panel.add(thumbnail, BorderLayout.WEST);
+            JPanel details = DashboardTheme.transparent(new BorderLayout(0, 6));
+            JPanel heading = DashboardTheme.transparent(new BorderLayout(0, 4));
+            JPanel stateRow = DashboardTheme.transparent(new FlowLayout(FlowLayout.LEFT, 0, 0));
+            state.setName("server-status"); stateRow.add(state); heading.add(stateRow, BorderLayout.NORTH);
+            JPanel identity = DashboardTheme.transparent(new BorderLayout(0, 2));
             select = new JToggleButton(); select.putClientProperty("html.disable", Boolean.TRUE); select.setText(server.name);
             select.setName("select-server-" + server.address); select.setHorizontalAlignment(SwingConstants.LEFT);
-            select.setFont(select.getFont().deriveFont(Font.BOLD, 16f)); select.setMargin(new Insets(4, 5, 4, 5));
+            select.setFont(select.getFont().deriveFont(Font.BOLD, 18f)); select.setMargin(new Insets(2, 5, 2, 5));
             select.setToolTipText("Server: " + server.name + " — " + server.address); select.getAccessibleContext().setAccessibleName("Select server " + server.name);
             select.getAccessibleContext().setAccessibleDescription("Arrow keys move between cards; Enter joins this server; Space selects it.");
             select.addActionListener(e -> selectServer(server, false));
             select.addFocusListener(new java.awt.event.FocusAdapter() { @Override public void focusGained(java.awt.event.FocusEvent e) { selectServer(server, false); } });
             identity.add(select, BorderLayout.NORTH);
             JLabel address = serverDetail(server.address, "address"); address.setName("server-address"); identity.add(address, BorderLayout.SOUTH);
-            heading.add(identity); panel.add(heading, BorderLayout.NORTH);
-            JPanel body = DashboardTheme.transparent(new BorderLayout(0, 10));
-            JPanel stateRow = DashboardTheme.transparent(new FlowLayout(FlowLayout.LEFT, 0, 0)); state.setName("server-status"); stateRow.add(state); body.add(stateRow, BorderLayout.NORTH);
+            heading.add(identity, BorderLayout.CENTER); details.add(heading, BorderLayout.NORTH);
+            JPanel body = DashboardTheme.transparent(new BorderLayout(0, 2));
             message.setName("server-message"); message.setFocusable(false); message.setPreferredSize(new Dimension(100, 40)); DashboardTheme.tint(message, false);
             body.add(message, BorderLayout.CENTER);
-            JPanel facts = DashboardTheme.transparent(new GridLayout(3, 1, 0, 5));
+            JPanel facts = toolbar(players, version, latency);
             players.setName("server-players"); version.setName("server-version"); latency.setName("server-latency");
-            facts.add(players); facts.add(version); facts.add(latency); body.add(facts, BorderLayout.SOUTH); panel.add(body);
+            body.add(facts, BorderLayout.SOUTH); details.add(body, BorderLayout.CENTER);
             JPanel controls = toolbar(primaryButton("Join", () -> { selectServer(server, false); joinSelected(); }),
                     iconButton("Ping selected", "ping", () -> { selectServer(server, false); pingSelected(); }),
                     iconButton("Copy address", "copy", () -> { selectServer(server, false); copyServerAddress(); }),
@@ -306,7 +361,7 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
                 action.getAccessibleContext().setAccessibleDescription(action.getToolTipText() + " for " + server.name + " at " + server.address);
                 action.addFocusListener(new java.awt.event.FocusAdapter() { @Override public void focusGained(java.awt.event.FocusEvent e) { selectServer(server, false); } });
             }
-            panel.add(controls, BorderLayout.SOUTH);
+            details.add(controls, BorderLayout.SOUTH); panel.add(details, BorderLayout.CENTER);
             bindServerKey("LEFT", "previous-server", () -> navigateServer(server, -1));
             bindServerKey("RIGHT", "next-server", () -> navigateServer(server, 1));
             bindServerKey("UP", "previous-server-row", () -> navigateServer(server, -serverCards.columns()));
@@ -315,7 +370,7 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
             java.awt.event.MouseAdapter click = new java.awt.event.MouseAdapter() {
                 @Override public void mousePressed(java.awt.event.MouseEvent e) { selectServer(server, true); }
             };
-            for (Component child : new Component[]{panel, heading, icon, address, body, stateRow, state, message, facts, players, version, latency}) child.addMouseListener(click);
+            for (Component child : new Component[]{panel, thumbnail, heading, icon, address, body, stateRow, state, message, facts, players, version, latency}) child.addMouseListener(click);
         }
         private void bindServerKey(String key, String name, Runnable action) {
             select.getInputMap(JComponent.WHEN_FOCUSED).put(KeyStroke.getKeyStroke(key), name);
@@ -326,8 +381,10 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
             panel.putClientProperty("AutoPlug.selected", selected); panel.repaint();
         }
         void update(ServerStatus ping) {
-            state.setText(ping == null ? "Checking…" : ping.online ? "Online" : "Unavailable");
+            state.setText(ping == null ? "Checking…" : ping.online ? "Online" : "Offline · Unavailable");
+            state.putClientProperty("server-online", ping == null ? null : ping.online);
             state.setIcon(DashboardTheme.icon(ping != null && ping.online ? "online" : ping == null ? "ping" : "offline-server"));
+            icon.setIcon(ping != null && ping.icon != null ? new ImageIcon(ping.icon) : DashboardTheme.serverIcon());
             String detail = ping == null ? "Checking this server’s status…" : ping.online ? Objects.toString(ping.motd, "") : Objects.toString(ping.message, "Status unavailable");
             message.setText(detail); message.setCaretPosition(0); message.setToolTipText("Server message: " + detail); message.getAccessibleContext().setAccessibleName("Server message: " + detail);
             players.setText("Players: " + (ping != null && ping.online ? ping.players + " / " + ping.capacity : "—"));
@@ -336,16 +393,37 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
             for (JLabel fact : new JLabel[]{players, version, latency}) fact.setToolTipText(fact.getText());
         }
     }
+    private static JLabel serverStatusBadge() {
+        JLabel badge = new JLabel("Checking…") {
+            @Override protected void paintComponent(Graphics graphics) {
+                Boolean online = (Boolean) getClientProperty("server-online");
+                boolean dark = DashboardTheme.dark();
+                Color foreground = online == null ? DashboardTheme.muted() : online
+                        ? new Color(dark ? 0x94E2B0 : 0x17643D) : new Color(dark ? 0xFFB0B0 : 0xA5262F);
+                Color background = online == null ? new Color(dark ? 0x303D50 : 0xEDF1F6) : online
+                        ? new Color(dark ? 0x173E2B : 0xE1F5E8) : new Color(dark ? 0x51272C : 0xFDE7E9);
+                if (!foreground.equals(getForeground())) setForeground(foreground);
+                Graphics2D g = (Graphics2D) graphics.create();
+                try {
+                    g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+                    g.setColor(background); g.fillRoundRect(0, 0, getWidth(), getHeight(), 12, 12);
+                } finally { g.dispose(); }
+                super.paintComponent(graphics);
+            }
+        };
+        badge.setBorder(new EmptyBorder(3, 9, 3, 9)); badge.setFont(badge.getFont().deriveFont(Font.BOLD, 11f));
+        return badge;
+    }
     private static JLabel serverDetail(String text, String icon) {
         JLabel label = new JLabel(); label.putClientProperty("html.disable", Boolean.TRUE); label.setText(text);
         label.setIcon(DashboardTheme.icon(icon)); label.setHorizontalAlignment(SwingConstants.LEFT);
         label.setToolTipText("Details: " + text); DashboardTheme.tint(label, false); return label;
     }
     private static final class ServerGrid extends JPanel implements Scrollable {
-        private static final int GAP = 14, CARD_HEIGHT = 322;
+        private static final int GAP = 12, CARD_HEIGHT = 246;
         private int previousColumns;
         ServerGrid() { super(null); setOpaque(false); }
-        int columns() { return getWidth() >= 800 ? 2 : 1; }
+        int columns() { return 1; }
         @Override public void doLayout() {
             int columns = columns(), width = Math.max(0, (getWidth() - GAP * (columns - 1)) / columns), index = 0;
             for (Component card : getComponents()) if (card.isVisible()) {
@@ -381,7 +459,11 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
         ProfileInfo base = preferredBase(clients);
         if (ping != null && ping.online) {
             ProfileInfo match = matchingClientProfile(clients, targetVersion, base.loader);
-            if (match != null) { launchOnServer(server, match); return; }
+            List<ProfileInfo> compatible = new ArrayList<>();
+            for (ProfileInfo p : clients) if (p.launchable && !p.template && targetVersion.equals(p.gameVersion)) compatible.add(p);
+            if (!compatible.isEmpty()) {
+                chooseProfile("server:" + server.address, "Join " + server.name, compatible, match, selected -> launchOnServer(server, selected)); return;
+            }
             JComboBox<ProfileInfo> baseChoice = new JComboBox<>(clients.toArray(new ProfileInfo[0])); baseChoice.setSelectedItem(base);
             JTextField target = new JTextField(targetVersion);
             JPanel details = fields("Server version", new JLabel(ping.version), "Base profile / loader", baseChoice, "Target Minecraft version", target);
@@ -396,13 +478,38 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
             }
             if (option != 1) return;
         }
-        JComboBox<ProfileInfo> choice = new JComboBox<>(clients.toArray(new ProfileInfo[0])); choice.setSelectedItem(base);
-        if (!form("Join " + server.name, fields("Local client profile", choice))) return;
-        ProfileInfo selected = (ProfileInfo) choice.getSelectedItem();
-        if (!ready(selected)) return;
-        if (ping != null && ping.online && !versionMatches(ping.version, selected.gameVersion)
-                && !confirm("Version differs", "The server reports " + ping.version + " but this profile uses " + selected.gameVersion + ".\nAttempt to connect with this profile?")) return;
-        launchOnServer(server, selected);
+        chooseProfile("server:" + server.address, "Join " + server.name, clients, base, selected -> {
+            if (!ready(selected)) return;
+            if (ping != null && ping.online && !versionMatches(ping.version, selected.gameVersion)
+                    && !confirm("Version differs", "The server reports " + ping.version + " but this profile uses " + selected.gameVersion + ".\nAttempt to connect with this profile?")) return;
+            launchOnServer(server, selected);
+        });
+    }
+    private void chooseProfile(String target, String title, List<ProfileInfo> candidates, ProfileInfo fallback, Consumer<ProfileInfo> selected) {
+        List<ProfileInfo> available = new ArrayList<>(candidates); available.removeIf(p -> !p.launchable || p.template);
+        if (available.isEmpty()) { information("No ready profile", "Create or finish migrating a compatible client profile first."); return; }
+        run("Loading your previous launch choice", () -> actions.preferredProfile(target), remembered -> {
+            ProfileInfo preferred = null;
+            for (ProfileInfo p : available) if (p.id.equals(remembered)) preferred = p;
+            if (preferred == null && loadedSettings != null) for (ProfileInfo p : available) if (p.id.equals(loadedSettings.defaultProfile)) preferred = p;
+            boolean auto = preferred != null;
+            if (preferred == null && fallback != null && available.stream().anyMatch(p -> p.id.equals(fallback.id))) {
+                preferred = fallback; if (target.startsWith("world:")) auto = true;
+            }
+            if (launchDialog != null) launchDialog.dispose(); if (launchChoices != null) launchChoices.close();
+            if (launchChoicePresenter != null) {
+                launchChoices = new LaunchChoicePanel(available, preferred, auto, selected);
+                launchChoicePresenter.accept(launchChoices); return;
+            }
+            JDialog dialog = new JDialog(SwingUtilities.getWindowAncestor(this), title, Dialog.ModalityType.APPLICATION_MODAL);
+            launchDialog = dialog;
+            LaunchChoicePanel panel = new LaunchChoicePanel(available, preferred, auto, profile -> {
+                dialog.dispose(); selected.accept(profile);
+            });
+            launchChoices = panel; dialog.add(panel); dialog.pack(); dialog.setResizable(true); dialog.setLocationRelativeTo(this);
+            dialog.addWindowListener(new java.awt.event.WindowAdapter() { @Override public void windowClosed(java.awt.event.WindowEvent e) { panel.close(); } });
+            dialog.setVisible(true); panel.close();
+        });
     }
     private ProfileInfo preferredBase(List<ProfileInfo> clients) {
         if (loadedSettings != null) for (ProfileInfo profile : clients) if (profile.id.equals(loadedSettings.defaultProfile)) return profile;
@@ -427,7 +534,12 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
     private void launchOnServer(SavedServer server, ProfileInfo profile) {
         if (!ready(profile)) return;
         ServerAddress address = ServerAddress.parse(server.address);
-        run("Launching " + profile.name, () -> { actions.launchProfile(profile.id, address.host, address.port); return null; }, ignored -> status.setText("Launch requested for " + server.name));
+        run("Launching " + profile.name, () -> {
+            actions.launchProfile(profile.id, address.host, address.port);
+            try { actions.rememberProfile("server:" + server.address, profile.id); browser.recordJoined(server.address); }
+            catch (Exception e) { receiveProgress("Minecraft started, but the last-used choice could not be saved: " + message(e)); }
+            return null;
+        }, ignored -> { status.setText("Launch requested for " + server.name); refreshServers(); });
     }
     static String gameVersionFromStatus(String version) {
         if (version == null) return "";
@@ -448,6 +560,7 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
     }
 
     private JPanel profilesPage() {
+        profileTable.setName("profile-table"); profileDetails.setName("profile-details");
         JPanel page = page("Profiles", "Isolated modpacks and pluginpacks, reusable across worlds and servers.");
         JPanel content = content();
         typeFilter.addActionListener(e -> showProfiles());
@@ -455,6 +568,9 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
                 button("Check", () -> checkOrUpdate(false)), button("Update", () -> checkOrUpdate(true)), button("Refresh", this::refreshProfiles)), BorderLayout.NORTH);
         content.add(tableScroll(profileTable), BorderLayout.CENTER);
         JPanel bottom = DashboardTheme.transparent(new BorderLayout(0, 8));
+        bottom.add(toolbar(button("Modrinth", () -> openLink("https://modrinth.com/mods")),
+                button("CurseForge", () -> openLink("https://www.curseforge.com/minecraft")),
+                button("AutoPlug mods", () -> openLink("https://autoplug.one/installer/mods"))), BorderLayout.NORTH);
         bottom.setBorder(new EmptyBorder(12, 0, 0, 0)); bottom.add(DashboardTheme.scroll(profileDetails), BorderLayout.CENTER);
         bottom.add(toolbar(primaryButton("Launch client", () -> {
             ProfileInfo profile = selectedProfile(); if (!ready(profile)) return;
@@ -477,6 +593,7 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
                 ProfileInfo profile = visibleProfiles.get(profileTable.convertRowIndexToModel(row));
                 profileDetails.setText(profile.directory + "\n" + (profile.launchable ? "Ready to launch" : "Needs migration review")
                         + (profile.migrationSummary == null || profile.migrationSummary.isEmpty() ? "" : "\n" + profile.migrationSummary));
+                profileDetails.setCaretPosition(0);
                 String assetFolder = "PLUGINS".equalsIgnoreCase(profile.type) ? "plugins" : "mods";
                 run("Checking profile content", () -> {
                     File folder = new File(profile.directory, assetFolder);
@@ -485,8 +602,10 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
                 }, empty -> {
                     int selected = profileTable.getSelectedRow();
                     if (empty && selected >= 0 && selected < visibleProfiles.size()
-                            && visibleProfiles.get(profileTable.convertRowIndexToModel(selected)).id.equals(profile.id))
+                            && visibleProfiles.get(profileTable.convertRowIndexToModel(selected)).id.equals(profile.id)) {
                         profileDetails.append("\nNo " + assetFolder + " added yet. Use Add JAR to build your pack, or keep this profile empty.");
+                        profileDetails.setCaretPosition(0);
+                    }
                 });
             }
         }); return page;
@@ -636,8 +755,7 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
                 JLabel quickPlay = DashboardTheme.badge("Quick Play"); quickPlay.setToolTipText("This version supports direct singleplayer Quick Play.");
                 badgeRow.add(Box.createHorizontalStrut(6)); badgeRow.add(quickPlay);
             }
-            JLabel name = new JLabel(world.name); name.setFont(name.getFont().deriveFont(Font.BOLD, 18f));
-            name.putClientProperty("html.disable", Boolean.TRUE);
+            JLabel name = new JLabel(); name.putClientProperty("html.disable", Boolean.TRUE); name.setText(world.name); name.setFont(name.getFont().deriveFont(Font.BOLD, 18f));
             heading.add(badgeRow, BorderLayout.NORTH); heading.add(name, BorderLayout.CENTER);
             details.add(heading, BorderLayout.NORTH); JTextArea description = textArea(world.metadataAvailable ? 4 : 3);
             DashboardTheme.tint(description, false);
@@ -647,11 +765,12 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
             description.setToolTipText(world.directory + (world.dataPacks.isEmpty() ? "" : " | Datapacks: " + String.join(", ", world.dataPacks)));
             details.add(description, BorderLayout.CENTER);
             if (world.local) details.add(toolbar(primaryButton("Launch", () -> launchLocalWorld(world)), button("Open folder", () -> openFolder(world.directory))), BorderLayout.SOUTH);
-            else details.add(toolbar(primaryButton("Play locally", () -> run("Starting world " + world.name, () -> { actions.launchWorld(world.id, false); return null; }, ignored -> refreshWorlds())),
+            else details.add(toolbar(primaryButton("Play locally", () -> launchManagedWorld(world, false)),
+                    button("Server console", () -> manageWorld(world)),
                     button("Share", () -> {
                         if (!confirm("Share this world", "Share “" + world.name + "” beyond this PC?\nThis may open a router port using UPnP and expose the server to the internet.\nOnly share the join address with people you trust.")) return;
+                        if (!world.running) { launchManagedWorld(world, true); return; }
                         run("Preparing world sharing", () -> {
-                            if (!world.running) actions.launchWorld(world.id, true);
                             return actions.shareWorld(world.id);
                         }, address -> { showShare(address); refreshWorlds(); });
                     }), button("Open folder", () -> openFolder(world.directory)), button("Minecraft EULA", () -> {
@@ -696,6 +815,21 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
     }
 
     private static boolean knownWorldVersion(WorldInfo world) { return world.gameVersion != null && !world.gameVersion.trim().isEmpty(); }
+    private void launchManagedWorld(WorldInfo world, boolean share) {
+        List<ProfileInfo> compatible = new ArrayList<>(); ProfileInfo server = null, prior = null;
+        for (ProfileInfo p : profiles) { if (p.id.equals(world.serverProfileId)) server = p; if (p.id.equals(world.clientProfileId)) prior = p; }
+        for (ProfileInfo p : clientProfiles()) {
+            String version = server == null ? world.gameVersion : server.gameVersion;
+            if (version != null && !version.isEmpty() && !version.equals(p.gameVersion)) continue;
+            if (server != null && "MODS_SERVER".equals(server.type) && !"VANILLA".equals(server.loader) && !server.loader.equals(p.loader)) continue;
+            compatible.add(p);
+        }
+        if (world.running) { manageWorld(world); return; }
+        chooseProfile("world:" + world.id, "Play " + world.name, compatible, prior, chosen ->
+            run("Starting world " + world.name, () -> { actions.launchWorld(world.id, share, chosen.id); return share ? actions.shareWorld(world.id) : ""; }, result -> {
+                if (share) showShare(result); refreshWorlds(); if (managedWorldPanel != null) managedWorldPanel.refresh();
+            }));
+    }
     private void launchLocalWorld(WorldInfo world) {
         String version = world.gameVersion;
         if (!knownWorldVersion(world)) {
@@ -708,8 +842,14 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
             version = choice.getText().trim();
         }
         final String selectedVersion = version;
-        run("Launching " + world.name + " with Minecraft " + selectedVersion,
-                () -> actions.launchLocalWorld(world.id, selectedVersion), result -> { status.setText(result); status.setToolTipText(result); });
+        run("Preparing compatible local-world profiles", () -> { actions.ensureDefaultProfiles(selectedVersion); return actions.profiles(); }, result -> {
+            profiles = result; showProfiles(); refreshDefaultProfiles();
+            List<ProfileInfo> compatible = new ArrayList<>();
+            for (ProfileInfo p : clientProfiles()) if (selectedVersion.equals(p.gameVersion) && "VANILLA".equals(p.loader)) compatible.add(p);
+            chooseProfile("world:" + world.id, "Launch " + world.name, compatible, null, chosen ->
+                run("Launching " + world.name + " with Minecraft " + selectedVersion,
+                    () -> actions.launchLocalWorld(world.id, selectedVersion, chosen.id), text -> { status.setText(text); status.setToolTipText(text); }));
+        });
     }
     private String profileName(String id) { for (ProfileInfo profile : profiles) if (profile.id.equals(id)) return profile.name; return id; }
     private void showShare(String text) {
@@ -766,6 +906,7 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
         DashboardTheme.tint(note, false); note.setBorder(new EmptyBorder(10, 0, 0, 0)); identity.add(note);
         JPanel defaults = settingsGroup("Defaults and sharing"); defaults.setName("settings-defaults");
         defaults.add(stackedFields("Default client profile", defaultProfile, "Preferred server port", port));
+        defaults.add(fullscreen);
         upnp.setText("Use UPnP when I choose Share"); defaults.add(upnp);
         JTextArea sharing = textArea(2); sharing.setText("Sharing is always explicit. UPnP opens a router port only after you choose Share.");
         DashboardTheme.tint(sharing, false); sharing.setBorder(new EmptyBorder(10, 0, 0, 0)); defaults.add(sharing);
@@ -845,7 +986,7 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
     private void showSettings(SettingsInfo settings) {
         loadedSettings = settings; java8.setText(settings.javaPaths.getOrDefault(8, settings.java8)); java17.setText(settings.javaPaths.getOrDefault(17, settings.java17)); java21.setText(settings.javaPaths.getOrDefault(21, settings.java21));
         StringJoiner extra = new StringJoiner("; "); settings.javaPaths.forEach((major, path) -> { if (major != 8 && major != 17 && major != 21) extra.add(major + "=" + path); }); extraJava.setText(extra.toString());
-        clientId.setText(settings.microsoftClientId); account.setText(settings.account); port.setValue(Math.max(1, Math.min(65535, settings.port))); upnp.setSelected(settings.upnp); rememberAccount.setSelected(settings.rememberAccount); refreshDefaultProfiles();
+        clientId.setText(settings.microsoftClientId); account.setText(settings.account); port.setValue(Math.max(1, Math.min(65535, settings.port))); upnp.setSelected(settings.upnp); rememberAccount.setSelected(settings.rememberAccount); fullscreen.setSelected(settings.fullscreen); refreshDefaultProfiles();
     }
     private void refreshDefaultProfiles() {
         String selected = loadedSettings == null ? "" : loadedSettings.defaultProfile;
@@ -861,7 +1002,7 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
             catch (RuntimeException e) { throw new IllegalArgumentException("Other runtimes must use major=path, separated by semicolons."); }
         }
         ProfileInfo profile = (ProfileInfo) defaultProfile.getSelectedItem(); settings.defaultProfile = profile == null ? "" : profile.id;
-        settings.port = (Integer) port.getValue(); settings.upnp = upnp.isSelected(); settings.rememberAccount = rememberAccount.isSelected(); settings.microsoftClientId = clientId.getText().trim(); settings.account = account.getText(); return settings;
+        settings.port = (Integer) port.getValue(); settings.upnp = upnp.isSelected(); settings.rememberAccount = rememberAccount.isSelected(); settings.fullscreen = fullscreen.isSelected(); settings.microsoftClientId = clientId.getText().trim(); settings.account = account.getText(); return settings;
     }
     private void saveSettings() {
         try { SettingsInfo settings = settingsFromForm(); run("Saving settings", () -> { actions.saveSettings(settings); return settings; }, this::showSettings); }
@@ -878,7 +1019,7 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
         if (closed.get()) return;
         int active = running.incrementAndGet();
         if (active == 1) { sourceUrl.setVisible(false); setActivity(description + "…"); }
-        if (active == 1 && activeDownloads == 0) progress.setIndeterminate(true);
+        if (active == 1 && activeDownloads == 0) { overall.start(); operationFailed = false; progress.setValue(overall.value()); progressClock.start(); }
         progress.setVisible(true);
         try { workers.submit(() -> {
             try {
@@ -890,18 +1031,18 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
                 });
             } catch (Exception e) { SwingUtilities.invokeLater(() -> {
                 if (closed.get()) return;
-                finishOperation(); setActivity(description + " failed: " + message(e)); error(e);
+                operationFailed = true; finishOperation(); setActivity(description + " failed: " + message(e)); error(e);
             }); }
         }); } catch (RejectedExecutionException ignored) { finishOperation(); }
     }
     private void finishOperation() {
-        if (running.decrementAndGet() <= 0 && activeDownloads == 0) { progress.setIndeterminate(false); progress.setVisible(false); }
+        if (running.decrementAndGet() <= 0 && activeDownloads == 0) { progressClock.stop(); if (!operationFailed) progress.setValue(overall.complete()); }
     }
     private void receiveProgress(String message) {
         if (message == null || message.trim().isEmpty()) return;
         SwingUtilities.invokeLater(() -> {
             if (closed.get()) return;
-            setActivity(message); progress.setIndeterminate(running.get() > 0 || activeDownloads > 0);
+            setActivity(message);
             java.util.regex.Matcher url = java.util.regex.Pattern.compile("https?://[^\\s<>]+", java.util.regex.Pattern.CASE_INSENSITIVE).matcher(message);
             if (url.find()) { sourceUrl.setText(url.group()); sourceUrl.setCaretPosition(0); sourceUrl.setVisible(true); revalidate(); }
         });
@@ -909,7 +1050,8 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
     private void receiveDownloadProgress(DownloadProgress.Event event) {
         SwingUtilities.invokeLater(() -> {
             if (closed.get()) return;
-            activeDownloads = event.activeTransfers;
+            int before = activeDownloads; activeDownloads = event.activeTransfers;
+            if (before == 0 && activeDownloads > 0 && running.get() == 0) { overall.start(); operationFailed = false; progress.setValue(overall.value()); progressClock.start(); }
             String label = event.message + (event.complete ? " — complete" : event.finished ? " — stopped" : "");
             if (!Objects.equals(status.getText(), label)) setActivity(label);
             if (event.sourceUrl != null && !event.sourceUrl.isEmpty()) {
@@ -917,22 +1059,20 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
                 sourceUrl.setText(event.sourceUrl); sourceUrl.setCaretPosition(0); sourceUrl.setVisible(true);
             }
             boolean measured = event.totalBytes > 0 && event.downloadedBytes >= 0;
-            progress.setIndeterminate(!measured && !event.finished);
             if (measured) {
                 int percent = (int) Math.min(100, 100.0 * event.downloadedBytes / event.totalBytes);
-                progress.setValue(percent);
-                progress.setToolTipText(readableSize(event.downloadedBytes) + " / " + readableSize(event.totalBytes) + " — current download");
+                progress.setToolTipText("Overall progress is estimated. Current file: " + percent + "% · " + readableSize(event.downloadedBytes) + " / " + readableSize(event.totalBytes));
             }
-            if (event.finished && (running.get() > 0 || activeDownloads > 0)) progress.setIndeterminate(true);
-            progress.setVisible(running.get() > 0 || activeDownloads > 0); revalidate();
+            if (event.finished && !event.complete && running.get() == 0) operationFailed = true;
+            if (event.finished && running.get() == 0 && activeDownloads == 0) { progressClock.stop(); if (!operationFailed) progress.setValue(overall.complete()); }
+            revalidate();
         });
     }
     private void receiveProgressValue(Integer percent) {
         SwingUtilities.invokeLater(() -> {
             if (closed.get() || running.get() == 0) return;
             boolean measured = percent != null && percent >= 0 && percent <= 100;
-            progress.setIndeterminate(!measured);
-            if (measured) { progress.setValue(percent); progress.setToolTipText(percent + "% of current step"); }
+            if (measured) progress.setToolTipText("Overall progress is estimated. Current step: " + percent + "%");
         });
     }
     private void setActivity(String message) {
@@ -941,6 +1081,7 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
         if (activity.getDocument().getLength() > 100000) activity.setText(activity.getText().substring(activity.getText().length() - 80000));
     }
     private void openFolder(String directory) { run("Opening folder", () -> { if (!Desktop.isDesktopSupported()) throw new UnsupportedOperationException("Opening folders is unavailable on this system."); Desktop.getDesktop().open(new File(directory)); return null; }, ignored -> {}); }
+    private void openLink(String url) { run("Opening mod downloads", () -> { if (!Desktop.isDesktopSupported()) throw new UnsupportedOperationException("Open " + url + " in your browser."); Desktop.getDesktop().browse(java.net.URI.create(url)); return null; }, ignored -> {}); }
     private void openEula() { run("Opening Minecraft EULA", () -> { if (!Desktop.isDesktopSupported()) throw new UnsupportedOperationException("Open https://aka.ms/MinecraftEULA in your browser."); Desktop.getDesktop().browse(java.net.URI.create("https://aka.ms/MinecraftEULA")); return null; }, ignored -> {}); }
     private void error(Exception e) { information("Could not complete action", message(e)); }
     private static String message(Exception e) { return e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage(); }
@@ -1005,6 +1146,8 @@ public final class DashboardPanel extends JPanel implements AutoCloseable {
     }
     @Override public void close() {
         if (!closed.compareAndSet(false, true)) return; workers.shutdownNow();
+        progressClock.stop(); if (launchChoices != null) launchChoices.close(); if (launchDialog != null) launchDialog.dispose();
+        if (managedWorldPanel != null) managedWorldPanel.close();
         progress.setIndeterminate(false); progress.setVisible(false);
         actions.onProgress(null); actions.onProgressValue(null);
         try { downloadSubscription.close(); } catch (Exception ignored) { }

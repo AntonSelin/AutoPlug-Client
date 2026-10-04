@@ -22,6 +22,7 @@ import java.util.concurrent.ConcurrentHashMap;
 public final class WorldService implements AutoCloseable {
     @FunctionalInterface public interface Probe { boolean isReady(String host, int port) throws Exception; }
     @FunctionalInterface public interface ProcessFactory { Process start(ServerLaunch launch) throws IOException; }
+    @FunctionalInterface interface LaunchWrapper { ServerLaunch wrap(Profile profile, ServerLaunch launch) throws Exception; }
 
     private final ProfileStore profiles;
     private final WorldStore worlds;
@@ -36,6 +37,7 @@ public final class WorldService implements AutoCloseable {
     private boolean closed;
     private int preferredPort = 25565;
     private boolean sharingEnabled = true;
+    private LaunchWrapper wrapper = (profile, launch) -> launch;
 
     public WorldService(ProfileStore profiles, WorldStore worlds, ServerInstaller installer, ClientLauncher launcher) {
         this(profiles, worlds, installer, launcher, new UpnpSharingService(),
@@ -43,6 +45,7 @@ public final class WorldService implements AutoCloseable {
                 launch -> new ProcessBuilder(launch.command).directory(launch.directory.toFile())
                         .redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.appendTo(
                                 launch.directory.resolve("autoplug-server.log").toFile())).start(), Duration.ofMinutes(3));
+        wrapper = new AutoPlugWorldBootstrap()::wrap;
     }
 
     public WorldService(ProfileStore profiles, WorldStore worlds, ServerInstaller installer, ClientLauncher launcher,
@@ -94,7 +97,9 @@ public final class WorldService implements AutoCloseable {
         ServerLaunch launch = installer.prepare(serverProfile, directory);
         if (!directory.toAbsolutePath().normalize().equals(launch.directory)) throw new IOException("Installer returned a different world directory");
         configureLocalServer(directory, port, authenticatedAccount);
-        ManagedServer server = new ManagedServer(processes.start(launch), 15000);
+        launch = wrapper.wrap(serverProfile, launch);
+        if (!directory.toAbsolutePath().normalize().equals(launch.directory)) throw new IOException("Wrapper returned a different world directory");
+        ManagedServer server = new ManagedServer(processes.start(launch), 30000, launch.stopCommand, launch.restartCommand);
         Process client = null;
         try {
             long deadline = System.nanoTime() + readyTimeout.toNanos();
@@ -126,7 +131,8 @@ public final class WorldService implements AutoCloseable {
         if (server.migrationPending || client.migrationPending) throw new IllegalArgumentException("Review the profile migration summary before launching");
         if (client.getType() != ProfileType.MODS || client.isTemplate()) throw new IllegalArgumentException("Select a playable client profile, not a template");
         if (!Objects.equals(server.getGameVersion(), client.getGameVersion())) throw new IllegalArgumentException("Server and client game versions must match");
-        if (server.getType() == ProfileType.MODS_SERVER && !Objects.equals(server.getLoader(), client.getLoader()))
+        if (server.getType() == ProfileType.MODS_SERVER && !"VANILLA".equals(server.getLoader())
+                && !Objects.equals(server.getLoader(), client.getLoader()))
             throw new IllegalArgumentException("Server and client mod loaders must match");
     }
 
@@ -170,6 +176,26 @@ public final class WorldService implements AutoCloseable {
         }
     }
     public void stopWorld(String worldId) { WorldSession session = sessions.get(worldId); if (session != null) session.close(); }
+    public void serverCommand(String worldId, String command) throws IOException { running(worldId).server().command(command); }
+    public void restartWorld(String worldId) throws IOException { running(worldId).server().restart(); }
+    private WorldSession running(String worldId) throws IOException {
+        WorldSession session = sessions.get(worldId);
+        if (session == null || session.isClosed()) throw new IOException("Launch this world before using its console");
+        return session;
+    }
+    /** A bounded tail of this world's own AutoPlug and Minecraft output. */
+    public String serverLog(String worldId) throws IOException {
+        worlds.get(worldId); Path file = worlds.getDirectory(worldId).resolve("autoplug-server.log");
+        if (Files.isSymbolicLink(file)) throw new IOException("World console log must not be linked");
+        if (!Files.exists(file)) return "No console output yet. Launch this world first.";
+        try (java.io.RandomAccessFile log = new java.io.RandomAccessFile(file.toFile(), "r")) {
+            long length = log.length(), start = Math.max(0, length - 65536); log.seek(start);
+            byte[] bytes = new byte[(int) (length - start)]; log.readFully(bytes);
+            String text = new String(bytes, StandardCharsets.UTF_8);
+            if (start > 0 && text.indexOf('\n') >= 0) text = text.substring(text.indexOf('\n') + 1);
+            return text;
+        }
+    }
     public Collection<WorldSession> activeSessions() { return Collections.unmodifiableList(new ArrayList<>(sessions.values())); }
     public boolean isProfileInUse(String profileId) {
         return sessions.values().stream().anyMatch(s -> !s.isClosed() && (profileId.equals(s.getWorld().clientProfileId) || profileId.equals(s.getWorld().serverProfileId)));

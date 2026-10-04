@@ -11,6 +11,7 @@ public final class WorldFixtureProcess {
     public static void main(String[] args) throws Exception {
         if (args[0].equals("client")) { Thread.sleep(60000); return; }
         if (args[0].equals("exit")) return;
+        Files.write(Paths.get("fixture.pid"), Long.toString(ProcessHandle.current().pid()).getBytes(StandardCharsets.UTF_8));
         Properties properties = new Properties();
         try (InputStream input = Files.newInputStream(Paths.get("server.properties"))) { properties.load(input); }
         if (!"127.0.0.1".equals(properties.getProperty("server-ip"))) throw new IllegalStateException("Fixture must be local");
@@ -20,8 +21,11 @@ public final class WorldFixtureProcess {
                 try {
                     BufferedReader reader = new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8));
                     String line;
-                    while ((line = reader.readLine()) != null) if (line.equals("stop")) {
-                        Files.write(Paths.get("stopped.txt"), "graceful".getBytes(StandardCharsets.UTF_8)); server.close(); return;
+                    while ((line = reader.readLine()) != null) {
+                        Files.write(Paths.get("commands.log"), (line + "\n").getBytes(StandardCharsets.UTF_8), StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+                        if (line.equals("stop")) {
+                            Files.write(Paths.get("stopped.txt"), "graceful".getBytes(StandardCharsets.UTF_8)); server.close(); return;
+                        }
                     }
                 } catch (IOException ignored) { }
             });

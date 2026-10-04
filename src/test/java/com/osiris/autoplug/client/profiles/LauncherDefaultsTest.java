@@ -14,11 +14,14 @@ class LauncherDefaultsTest {
     @Test void firstRunHasMatchingClientAndServerWithoutAcceptingEula() throws Exception {
         Path root = temporary.resolve("autoplug");
         try (LauncherServices service = new LauncherServices(root, temporary.resolve("minecraft"), null)) {
-            assertEquals(2, service.profiles().size());
+            assertEquals(3, service.profiles().size());
             Profile client = service.getProfiles().get(service.settings().defaultProfile);
             assertEquals("Default (VANILLA)", client.name);
             assertEquals("VANILLA", client.loader); assertEquals(ProfileType.MODS, client.type);
             assertEquals("1.21.1", client.gameVersion); assertFalse(client.template);
+            Profile fabric = service.getProfiles().list().stream().filter(p -> "FABRIC".equals(p.loader)).findFirst().orElseThrow(() -> new AssertionError("Missing Fabric default"));
+            assertEquals("Default (FABRIC)", fabric.name); assertEquals(client.gameVersion, fabric.gameVersion);
+            assertEquals(FabricDefaultProfile.PRESET, fabric.builtinPreset); assertFalse(fabric.builtinPresetInstalled);
             assertTrue(Files.isDirectory(client.getDirectory().resolve("mods")));
             LauncherActions.WorldInfo world = service.createWorld("First world", "", "");
             Profile server = service.getProfiles().get(world.serverProfileId);
@@ -38,16 +41,16 @@ class LauncherDefaultsTest {
             assertNotEquals(original, requested);
             assertEquals(requested, service.ensureDefaultProfiles("1.20.1").id);
             assertEquals(original, service.settings().defaultProfile, "Choosing a server version must not overwrite the selected user default");
-            assertEquals(4, service.profiles().size());
+            assertEquals(6, service.profiles().size());
             LauncherActions.WorldInfo world = service.createWorld("Other version", null, requested);
             assertEquals("1.20.1", service.getProfiles().get(world.serverProfileId).gameVersion);
             assertThrows(java.io.IOException.class, () -> service.ensureDefaultProfiles("../escape"));
-            assertEquals(4, service.profiles().size());
+            assertEquals(6, service.profiles().size());
         }
         try (LauncherServices reopened = new LauncherServices(root, temporary.resolve("minecraft"), null)) {
             assertEquals(original, reopened.settings().defaultProfile);
             assertEquals(requested, reopened.ensureDefaultProfiles("1.20.1").id);
-            assertEquals(4, reopened.profiles().size());
+            assertEquals(6, reopened.profiles().size());
         }
     }
 
@@ -66,7 +69,7 @@ class LauncherDefaultsTest {
             assertArrayEquals(metadata, Files.readAllBytes(profile.getDirectory().resolve("profile.json")));
             assertEquals(Collections.singletonList("keep-me"), Files.readAllLines(profile.getDirectory().resolve("options.txt")));
             assertEquals("1.19.4", service.ensureDefaultProfiles("").gameVersion);
-            assertEquals(5, service.profiles().size());
+            assertEquals(7, service.profiles().size());
         }
     }
 
@@ -98,7 +101,7 @@ class LauncherDefaultsTest {
                 assertNotEquals(unavailable, selected.id); assertFalse(selected.template); assertFalse(selected.migrationPending);
                 assertEquals("VANILLA", selected.loader); assertEquals("1.20.4", selected.gameVersion);
                 assertEquals(selected.id, service.ensureDefaultProfiles("").id);
-                assertEquals(5, service.profiles().size());
+                assertEquals(7, service.profiles().size());
                 assertArrayEquals(metadata, Files.readAllBytes(service.getProfiles().get(unavailable).getDirectory().resolve("profile.json")));
             }
         }

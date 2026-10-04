@@ -81,6 +81,9 @@ public class Main {
      *              - test: enables test mode <br>
      */
     public static void main(String[] _args) {
+        try {
+            if (com.osiris.autoplug.client.worlds.AutoPlugWorldBootstrap.configureIfChild(_args)) _args = new String[]{"skipSystemCheck"};
+        } catch (Exception e) { System.err.println("Managed AutoPlug world could not start: " + e.getMessage()); System.exit(2); return; }
 
         LauncherEntry launcherEntry = new LauncherEntry();
         if (launcherEntry.isLauncherCommand(_args)) {
@@ -134,6 +137,9 @@ public class Main {
                 system.checkReadWritePermissions();
                 system.checkInternetAccess();
                 system.addShutDownHook();
+            } else if (com.osiris.autoplug.client.worlds.AutoPlugWorldBootstrap.isChild()) {
+                // The parent already prepared the world; retain graceful stop even when skipping network/system prompts.
+                new SystemChecker().addShutDownHook();
             }
 
             // Set default SysOut to TeeOutput, for the OnlineConsole
@@ -298,7 +304,8 @@ public class Main {
             }
 
             try {
-                if (generalConfig.autoplug_start_on_boot.asBoolean())
+                if (com.osiris.autoplug.client.worlds.AutoPlugWorldBootstrap.isChild()) { /* Parent owns child lifetime; never change global startup registration. */ }
+                else if (generalConfig.autoplug_start_on_boot.asBoolean())
                     new UtilsNative().enableStartOnBootIfNeeded(new UtilsJar().getThisJar());
                 else new UtilsNative().disableStartOnBootIfNeeded();
             } catch (Exception e) {

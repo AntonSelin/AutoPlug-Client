@@ -16,12 +16,14 @@ public class LauncherServices implements LauncherActions, AutoCloseable {
     public class State {
         public SettingsInfo settings = new SettingsInfo();
         public String offlineName = "Player", selectedAccount = "";
+        public Map<String, String> launchChoices = new LinkedHashMap<>();
     }
     private final Path root;
     private final Consumer<String> progress;
     private volatile Consumer<String> progressListener = ignored -> { };
     private final ProfileStore profiles;
     private final ProfileUpdates updates;
+    private final FabricDefaultProfile fabricDefaults;
     private final WorldStore worlds;
     private final LocalWorldStore localWorlds;
     private final WorldService worldService;
@@ -53,6 +55,7 @@ public class LauncherServices implements LauncherActions, AutoCloseable {
         };
         Files.createDirectories(this.root);
         profiles = new ProfileStore(this.root.resolve("profiles")); updates = new ProfileUpdates(profiles);
+        fabricDefaults = new FabricDefaultProfile(profiles, updates);
         worlds = new WorldStore(this.root.resolve("worlds"));
         localWorlds = new LocalWorldStore(minecraftDirectory, this.progress);
         runtimes = new JavaRuntimeManager(this.root.resolve("cache/runtimes"));
@@ -60,6 +63,7 @@ public class LauncherServices implements LauncherActions, AutoCloseable {
         accounts = new AccountStore(this.root.resolve("accounts.json"));
         state = Files.exists(this.root.resolve("settings.json")) ? json.read(this.root.resolve("settings.json"), State.class) : new State();
         if (state.settings == null) state.settings = new SettingsInfo();
+        if (state.launchChoices == null) state.launchChoices = new LinkedHashMap<>();
         if (state.settings.javaPaths == null) state.settings.javaPaths = new LinkedHashMap<>();
         account = MinecraftAccount.offline(state.offlineName == null ? "Player" : state.offlineName);
         if (state.settings.rememberAccount) for (MinecraftAccount saved : accounts.list()) if (saved.uuid.equals(state.selectedAccount)) account = saved;
@@ -95,6 +99,7 @@ public class LauncherServices implements LauncherActions, AutoCloseable {
         }
         Profile client = profiles.ensureDefault(target, ProfileType.MODS);
         profiles.ensureDefault(target, ProfileType.MODS_SERVER);
+        profiles.ensureFabricDefault(target);
         if (selected == null) { state.settings.defaultProfile = client.id; saveState(); }
         return info(client);
     }
@@ -156,35 +161,66 @@ public class LauncherServices implements LauncherActions, AutoCloseable {
     }
     @Override public List<WorldInfo> worlds() throws Exception {
         List<WorldInfo> result = new ArrayList<>();
+        Map<String, Long> activity = new HashMap<>();
         try {
             for (LocalWorld world : localWorlds.list()) {
                 LocalWorld owned = world;
                 try { owned = worlds.ownedLocal(world, false); }
                 catch (IOException e) { progress.accept("Could not load ownership for '" + world.name + "': " + e.getMessage()); }
-                result.add(info(owned));
+                WorldInfo view = info(owned); result.add(view);
+                activity.put(view.id, worldActivity(view, 0));
             }
         } catch (IOException | SecurityException e) {
             progress.accept("Could not list local Minecraft saves: " + e.getMessage());
         }
-        for (VirtualWorld w : worlds.list()) result.add(info(w));
+        for (VirtualWorld w : worlds.list()) {
+            WorldInfo view = info(w); result.add(view);
+            activity.put(view.id, worldActivity(view, w.createdAt));
+        }
+        result.sort(Comparator.<WorldInfo>comparingLong(world -> activity.getOrDefault(world.id, 0L)).reversed()
+                .thenComparing(world -> world.name, String.CASE_INSENSITIVE_ORDER).thenComparing(world -> world.id));
         return result;
     }
+    /** A bounded background metadata read: creation, modification and LastPlayed all count as activity. */
+    static long worldActivity(WorldInfo world, long createdAt) {
+        long latest = Math.max(Math.max(0, createdAt), world.lastPlayed);
+        try {
+            Path directory = Paths.get(world.directory);
+            for (Path path : Arrays.asList(directory, directory.resolve("level.dat"), directory.resolve("world/level.dat"))) {
+                try {
+                    java.nio.file.attribute.BasicFileAttributes attributes = Files.readAttributes(path,
+                            java.nio.file.attribute.BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+                    if (attributes.isSymbolicLink()) continue;
+                    latest = Math.max(latest, Math.max(attributes.creationTime().toMillis(), attributes.lastModifiedTime().toMillis()));
+                } catch (IOException | SecurityException ignored) { }
+            }
+        } catch (InvalidPathException | NullPointerException ignored) { }
+        return latest;
+    }
     @Override public String launchLocalWorld(String id, String version) throws Exception {
+        return launchLocalWorld(id, version, "");
+    }
+    @Override public String launchLocalWorld(String id, String version, String profileId) throws Exception {
         LocalWorld world = worlds.getLocal(id, localWorlds);
         String selected = localWorlds.launchVersion(world, version);
+        Profile chosen = profileId == null || profileId.isEmpty() ? profiles.ensureDefault(selected, ProfileType.MODS) : profiles.get(profileId);
+        if (!chosen.type.isClient() || chosen.template || chosen.migrationPending || !"VANILLA".equals(chosen.loader) || !selected.equals(chosen.gameVersion))
+            throw new IOException("Existing local saves require a ready Vanilla profile with exactly the save's selected version.");
         // All standard saves share one game directory and its settings/native files.
         // Retain one lease for that directory until the child exits, including preparation failures.
         ProfileLease lease = new ProfileLease(world.gameDirectory);
         try {
             MinecraftAccount current = currentAccount();
             PreparedLaunch prepared = launcher.prepare(new LaunchRequest(world.gameDirectory, selected, "VANILLA", null,
-                    current, null, 0, world.saveName()), progress);
+                    current, null, 0, world.saveName(), state.settings.fullscreen), progress);
             LocalWorld fresh = worlds.getLocal(id, localWorlds);
             if (!fresh.gameVersion.equals(world.gameVersion) || fresh.modded != world.modded)
                 throw new IOException("The save's version metadata changed while preparing Minecraft. Refresh and select it again.");
             localWorlds.launchVersion(fresh, selected);
             LocalWorld owned = worlds.registerLocal(fresh);
             Process process = launcher.launch(prepared); trackLocalClient(owned.id, process, lease);
+            try { rememberProfile("world:" + id, chosen.id); }
+            catch (IOException e) { progress.accept("Minecraft started, but the launch choice could not be saved: " + e.getMessage()); }
             if (prepared.arguments.contains("--quickPlaySingleplayer"))
                 return "Started Minecraft " + selected + " with Quick Play for '" + world.name + "'.";
             return "Started Minecraft " + selected + " with automatic entry for '" + world.name + "'.";
@@ -210,7 +246,7 @@ public class LauncherServices implements LauncherActions, AutoCloseable {
         if (server.type.isClient() || !client.type.isClient()) throw new IOException("Choose a server profile and a client profile");
         if (!server.gameVersion.equals(client.gameVersion)) throw new IOException("World server and client must use the same game version");
         if (client.template) throw new IOException("Clone the client template before attaching it to a world");
-        if (server.type == ProfileType.MODS_SERVER && !server.loader.equals(client.loader)) throw new IOException("Modded world and client loaders must match");
+        if (server.type == ProfileType.MODS_SERVER && !"VANILLA".equals(server.loader) && !server.loader.equals(client.loader)) throw new IOException("Modded world and client loaders must match");
         if (server.type == ProfileType.MODS_SERVER && server.loaderVersion != null && client.loaderVersion != null && !server.loaderVersion.equals(client.loaderVersion))
             throw new IOException("Pinned world and client loader versions must match");
         return info(worlds.create(name, serverProfileId, clientProfileId));
@@ -225,9 +261,40 @@ public class LauncherServices implements LauncherActions, AutoCloseable {
             if (share) progress.accept(session.getShareResult().getMessage());
         } finally { worldAccount.remove(); }
     }
+    @Override public synchronized void launchWorld(String id, boolean share, String profileId) throws Exception {
+        VirtualWorld world = worlds.get(id);
+        Profile client = profiles.get(profileId), server = profiles.get(world.serverProfileId);
+        if (!client.type.isClient() || client.template || client.migrationPending || !client.gameVersion.equals(server.gameVersion)
+                || (server.type == ProfileType.MODS_SERVER && !"VANILLA".equals(server.loader) && !server.loader.equals(client.loader)))
+            throw new IOException("Choose a ready client matching this world's Minecraft version and mod loader.");
+        if (!world.clientProfileId.equals(profileId) && !worldService.activeSessions().isEmpty()) {
+            for (WorldSession session : worldService.activeSessions()) if (session.getWorld().id.equals(id))
+                throw new IOException("Stop this world before changing its client profile.");
+        }
+        world.clientProfileId = profileId; worlds.save(world);
+        launchWorld(id, share);
+        try { rememberProfile("world:" + id, profileId); }
+        catch (IOException e) { progress.accept("World started, but the launch choice could not be saved: " + e.getMessage()); }
+    }
+    @Override public synchronized String preferredProfile(String target) {
+        String id = state.launchChoices.getOrDefault(target, "");
+        if (id.isEmpty()) return "";
+        try { Profile p = profiles.get(id); return p.type.isClient() && !p.template && !p.migrationPending ? id : ""; }
+        catch (IOException e) { return ""; }
+    }
+    @Override public synchronized void rememberProfile(String target, String profileId) throws IOException {
+        if (target == null || target.length() > 1024 || !(target.startsWith("server:") || target.startsWith("world:"))) throw new IOException("Invalid launch target");
+        Profile profile = profiles.get(profileId);
+        if (!profile.type.isClient() || profile.template || profile.migrationPending) throw new IOException("Choose a ready client profile");
+        state.launchChoices.put(target, profileId); saveState();
+    }
     @Override public String shareWorld(String id) {
         ShareResult result = worldService.shareWorld(id); return result.isShared() ? result.address + "\n" + result.message : result.message;
     }
+    @Override public String serverLog(String id) throws Exception { return worldService.serverLog(id); }
+    @Override public void serverCommand(String id, String command) throws Exception { worldService.serverCommand(id, command); }
+    @Override public void stopWorld(String id) { worldService.stopWorld(id); }
+    @Override public void restartWorld(String id) throws Exception { worldService.restartWorld(id); }
     @Override public void launchProfile(String id, String host, int port) throws Exception { launchClient(id, host, port); }
     private Process launchClient(String id, String host, int port) throws Exception {
         if (id == null || id.trim().isEmpty()) {
@@ -239,10 +306,11 @@ public class LauncherServices implements LauncherActions, AutoCloseable {
         if (profile.migrationPending) throw new IOException("Review and apply profile migration before launching");
         ProfileLease lease = new ProfileLease(profile.getDirectory());
         try {
+            fabricDefaults.prepare(profile, progress);
             MinecraftAccount current = worldAccount.get();
             if (current == null) current = currentAccount();
             else if (current.needsRefresh()) current = microsoft.refresh(current);
-            PreparedLaunch prepared = launcher.prepare(new LaunchRequest(profile.getDirectory(), profile.gameVersion, profile.loader, profile.loaderVersion, current, host, port), progress);
+            PreparedLaunch prepared = launcher.prepare(new LaunchRequest(profile.getDirectory(), profile.gameVersion, profile.loader, profile.loaderVersion, current, host, port, state.settings.fullscreen), progress);
             Process process = launcher.launch(prepared); clients.put(profile.id, process);
             process.onExit().thenRun(() -> { clients.remove(profile.id, process); try { lease.close(); } catch (IOException e) { progress.accept("Could not release profile lock: " + e.getMessage()); } });
             return process;
@@ -260,7 +328,7 @@ public class LauncherServices implements LauncherActions, AutoCloseable {
         copy.java8 = state.settings.java8; copy.java17 = state.settings.java17; copy.java21 = state.settings.java21;
         copy.javaPaths = new LinkedHashMap<>(state.settings.javaPaths); copy.defaultProfile = state.settings.defaultProfile;
         copy.port = state.settings.port; copy.upnp = state.settings.upnp; copy.microsoftClientId = state.settings.microsoftClientId;
-        copy.rememberAccount = state.settings.rememberAccount; copy.account = account.username + (account.offline ? " (offline)" : " (Microsoft)"); return copy;
+        copy.fullscreen = state.settings.fullscreen; copy.rememberAccount = state.settings.rememberAccount; copy.account = account.username + (account.offline ? " (offline)" : " (Microsoft)"); return copy;
     }
     @Override public synchronized void saveSettings(SettingsInfo settings) throws Exception {
         if (settings.port < 1 || settings.port > 65535) throw new IOException("Port must be between 1 and 65535");

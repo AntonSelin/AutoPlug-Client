@@ -74,6 +74,41 @@ public class ModrinthAPI {
         return connection;
     }
 
+    public JsonObject projectMetadata(String id) throws IOException {
+        return metadata("/project/" + checkedId(id)).getAsJsonObject();
+    }
+    public com.google.gson.JsonArray versionsFor(String project, String gameVersion, String loader) throws IOException {
+        String query = "loaders=" + java.net.URLEncoder.encode(new com.google.gson.Gson().toJson(List.of(loader)), "UTF-8")
+                + "&game_versions=" + java.net.URLEncoder.encode(new com.google.gson.Gson().toJson(List.of(gameVersion)), "UTF-8");
+        return metadata("/project/" + checkedId(project) + "/version?" + query).getAsJsonArray();
+    }
+    public JsonObject versionMetadata(String id) throws IOException { return metadata("/version/" + checkedId(id)).getAsJsonObject(); }
+    private String checkedId(String id) throws IOException {
+        if (id == null || !id.matches("[A-Za-z0-9_-]{1,128}")) throw new IOException("Invalid Modrinth identifier");
+        return id;
+    }
+    private com.google.gson.JsonElement metadata(String path) throws IOException {
+        HttpURLConnection connection = openConnection(path);
+        try (com.osiris.autoplug.client.launcher.DownloadProgress.Transfer transfer =
+                     com.osiris.autoplug.client.launcher.DownloadProgress.begin("Fetching Modrinth metadata", baseUrl + path)) {
+            int status = connection.getResponseCode();
+            transfer.redirect(connection.getURL().toString());
+            if (status != 200) throw new IOException("Modrinth metadata returned HTTP " + status + " for " + path);
+            long total = connection.getContentLengthLong();
+            if (total > 8 * 1024 * 1024) throw new IOException("Modrinth metadata exceeds 8 MiB");
+            try (java.io.InputStream input = connection.getInputStream(); java.io.ByteArrayOutputStream content = new java.io.ByteArrayOutputStream()) {
+                byte[] buffer = new byte[8192]; int count;
+                while ((count = input.read(buffer)) != -1) {
+                    if (Thread.currentThread().isInterrupted()) throw new java.io.InterruptedIOException("Modrinth lookup cancelled");
+                    if (content.size() + count > 8 * 1024 * 1024) throw new IOException("Modrinth metadata exceeds 8 MiB");
+                    content.write(buffer, 0, count); transfer.update(content.size(), total);
+                }
+                com.google.gson.JsonElement result = com.google.gson.JsonParser.parseString(new String(content.toByteArray(), StandardCharsets.UTF_8));
+                transfer.complete(content.size(), total); return result;
+            } catch (com.google.gson.JsonParseException | IllegalStateException e) { throw new IOException("Invalid Modrinth metadata", e); }
+        } finally { connection.disconnect(); }
+    }
+
     /**
      * Exact target-version lookup for both upgrades and downgrades. Unlike the legacy
      * timestamp comparison, this compares artifact hashes and never treats a failed
